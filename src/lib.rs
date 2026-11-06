@@ -51,7 +51,7 @@
 //!     let mut events = EventLoop::new(&ui)?;
 //!     let size = Icon::tray_size();
 //!     let icon = Icon::from_argb(size, vec![0xFF2E_86DE; (size * size) as usize])?;
-//!     let mut tray = Tray::new(&mut events, "Quiz", &icon)?;
+//!     let mut tray = Tray::new(&events, "Quiz", &icon)?;
 //!     tray.set_menu(&[
 //!         MenuItem::command(Command::AskNow, "Ask now"),
 //!         MenuItem::Separator,

@@ -8,7 +8,7 @@
 //! an unlock of the session, or a quit. Popups and dialogs that show do not stop the loop, so
 //! a dialog can stay open while popups come and go.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -90,7 +90,7 @@ impl<C> From<Ready> for Event<C> {
 /// Make it with a [`Ui`], then give it to [`Tray::new`](crate::tray::Tray::new).
 pub struct EventLoop<C> {
     waiter: Waiter,
-    sources: Vec<Weak<dyn Source<C>>>,
+    sources: RefCell<Vec<Weak<dyn Source<C>>>>,
 }
 
 impl<C> EventLoop<C> {
@@ -98,7 +98,7 @@ impl<C> EventLoop<C> {
     pub fn new(ui: &Ui) -> Result<Self> {
         Ok(Self {
             waiter: Waiter::new(ui)?,
-            sources: Vec::new(),
+            sources: RefCell::new(Vec::new()),
         })
     }
 
@@ -107,8 +107,8 @@ impl<C> EventLoop<C> {
         &self.waiter.ui
     }
 
-    pub(crate) fn add_source(&mut self, source: Weak<dyn Source<C>>) {
-        self.sources.push(source);
+    pub(crate) fn add_source(&self, source: Weak<dyn Source<C>>) {
+        self.sources.borrow_mut().push(source);
     }
 
     /// Handle the window messages until there is something for the app. With `until`, it
@@ -132,8 +132,9 @@ impl<C> EventLoop<C> {
     }
 
     fn take_command(&mut self) -> Option<C> {
-        self.sources.retain(|s| s.strong_count() > 0);
-        self.sources
+        let sources = self.sources.get_mut();
+        sources.retain(|s| s.strong_count() > 0);
+        sources
             .iter()
             .find_map(|s| s.upgrade().and_then(|s| s.take_command()))
     }

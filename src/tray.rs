@@ -275,7 +275,7 @@ pub struct Tray<C> {
 impl<C: Clone + 'static> Tray<C> {
     /// Add an icon with this tooltip to the notification area. The menu is empty until
     /// [`Tray::set_menu`].
-    pub fn new(events: &mut EventLoop<C>, tooltip: &str, icon: &Icon) -> Result<Self> {
+    pub fn new(events: &EventLoop<C>, tooltip: &str, icon: &Icon) -> Result<Self> {
         let native = Native::new(events.ui().hinstance(), tooltip, icon)?;
         let core = Rc::new(Core {
             shared: native.window.share(),
