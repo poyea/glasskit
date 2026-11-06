@@ -23,6 +23,7 @@ const WINDOW_RADIUS: f32 = 8.0;
 const DISMISS_MIN_WIDTH: f32 = 72.0;
 const DISMISS_TEXT_PADDING: f32 = 12.0;
 const DISMISS_HEIGHT: f32 = 28.0;
+const IMAGE_MAX_HEIGHT: f32 = 240.0;
 
 pub(super) struct Fonts {
     pub(super) prompt: IDWriteTextFormat,
@@ -59,6 +60,8 @@ pub(super) struct Layout {
     pub(super) radius: f32,
     pub(super) window_radius: f32,
     pub(super) prompt: IDWriteTextLayout,
+    /// Where the image of the prompt shows, if it has one.
+    pub(super) image: Option<D2D_RECT_F>,
     /// The choices in order, then the dismiss button.
     pub(super) buttons: Vec<Button>,
 }
@@ -69,6 +72,7 @@ pub(super) struct Content {
     pub(super) spans: Vec<markup::Span>,
     pub(super) choices: Vec<String>,
     pub(super) dismiss: String,
+    pub(super) image: Option<(u32, u32)>,
 }
 
 impl Content {
@@ -83,6 +87,7 @@ impl Content {
             spans,
             choices: prompt.choices.clone(),
             dismiss,
+            image: prompt.image.as_ref().map(|i| (i.width, i.height)),
         }
     }
 }
@@ -108,6 +113,12 @@ pub(super) fn build(
     let prompt_layout = gfx.text_layout(prompt, &fonts.prompt, inner)?;
     markup::apply(&prompt_layout, spans)?;
     let mut y = pad + glass::layout_height(&prompt_layout)?.ceil() + s(TEXT_GAP);
+    let image = content.image.map(|size| {
+        let (w, h) = fit(size, scale, inner, s(IMAGE_MAX_HEIGHT));
+        let rect = glass::rect(pad + ((inner - w) / 2.0).round(), y, w, h);
+        y += h + s(TEXT_GAP);
+        rect
+    });
 
     let mut buttons = Vec::with_capacity(choices.len() + 1);
     for (i, choice) in choices.iter().enumerate() {
@@ -140,6 +151,31 @@ pub(super) fn build(
         radius: s(BUTTON_RADIUS),
         window_radius: s(WINDOW_RADIUS),
         prompt: prompt_layout,
+        image,
         buttons,
     })
+}
+
+/// The size of an image of `(width, height)` pixels at this scale, smaller if needed to fit
+/// in `max_width` and `max_height`, with the same aspect ratio. It is whole pixels.
+fn fit((width, height): (u32, u32), scale: f32, max_width: f32, max_height: f32) -> (f32, f32) {
+    let (w, h) = (width as f32 * scale, height as f32 * scale);
+    let shrink = (max_width / w).min(max_height / h).min(1.0);
+    ((w * shrink).round().max(1.0), (h * shrink).round().max(1.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_small_image_keeps_its_size_at_the_scale() {
+        assert_eq!(fit((100, 50), 1.5, 324.0, 360.0), (150.0, 75.0));
+    }
+
+    #[test]
+    fn a_large_image_shrinks_and_keeps_its_shape() {
+        assert_eq!(fit((1000, 500), 1.0, 324.0, 240.0), (324.0, 162.0));
+        assert_eq!(fit((300, 600), 1.0, 324.0, 240.0), (120.0, 240.0));
+    }
 }

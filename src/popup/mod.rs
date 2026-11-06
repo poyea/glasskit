@@ -8,6 +8,7 @@
 
 mod countdown;
 mod glass;
+mod image;
 mod layout;
 mod markup;
 mod prompt;
@@ -38,6 +39,7 @@ use crate::ui::PopupSlot;
 use crate::window::{self, Window};
 use countdown::{label, whole_seconds};
 use glass::{Graphics, Scene};
+pub use image::Image;
 pub use prompt::{Mark, PopupStyle, Prompt};
 use state::{WindowState, wndproc};
 

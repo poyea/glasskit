@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use super::Image;
+
 /// How a choice button shows after a click. See [`Prompt::marks`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mark {
@@ -23,6 +25,7 @@ pub struct Prompt {
     pub(super) dismiss: String,
     pub(super) auto_dismiss: Option<Duration>,
     pub(super) markup: bool,
+    pub(super) image: Option<Image>,
 }
 
 impl Prompt {
@@ -40,6 +43,7 @@ impl Prompt {
             dismiss: "Dismiss".into(),
             auto_dismiss: None,
             markup: false,
+            image: None,
         }
     }
 
@@ -87,6 +91,14 @@ impl Prompt {
     #[must_use]
     pub fn markup(mut self) -> Self {
         self.markup = true;
+        self
+    }
+
+    /// Show this image below the text. It keeps its aspect ratio, and gets smaller to fit
+    /// the popup width and a height of 240 pixels at 100% display scale.
+    #[must_use]
+    pub fn image(mut self, image: Image) -> Self {
+        self.image = Some(image);
         self
     }
 

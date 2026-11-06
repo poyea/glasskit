@@ -7,12 +7,16 @@ use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant, SystemTime};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
+};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
-    ID2D1DeviceContext,
+    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_ROUNDED_RECT,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, ID2D1DeviceContext,
 };
 use windows::Win32::Graphics::DirectWrite::{DWRITE_MEASURING_MODE_NATURAL, IDWriteTextFormat};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
@@ -28,7 +32,7 @@ use windows_numerics::Vector2;
 use super::countdown::{self, Countdown};
 use super::glass::{self, Scene};
 use super::layout::Layout;
-use super::{Mark, PopupStyle, Prompt, Reply, Response};
+use super::{Image, Mark, PopupStyle, Prompt, Reply, Response};
 use crate::error::{Call, Result};
 use crate::theme::Theme;
 use crate::ui::Notice;
@@ -57,6 +61,7 @@ pub(super) struct WindowState {
     dismiss: String,
     countdown: RefCell<Option<Countdown>>,
     marks: Option<Vec<Vec<(usize, Mark)>>>,
+    image: Option<Image>,
     selected: Cell<Option<usize>>,
     /// True from the start of the feedback or the fade-out. Then the popup ignores the mouse.
     closing: Cell<bool>,
@@ -89,6 +94,7 @@ impl WindowState {
             dismiss: request.dismiss.to_string(),
             countdown: RefCell::new(request.auto_dismiss.map(Countdown::new)),
             marks: request.marks.clone(),
+            image: request.image.clone(),
             selected: Cell::new(None),
             closing: Cell::new(false),
             pending: Cell::new(None),
@@ -287,6 +293,9 @@ impl WindowState {
                 &text,
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
             );
+            if let (Some(rect), Some(image)) = (l.image, &self.image) {
+                draw_image(dc, image, rect)?;
+            }
 
             let border = dc.CreateSolidColorBrush(&t.button_border, None)?;
             for (i, b) in l.buttons.iter().enumerate() {
@@ -336,6 +345,44 @@ impl WindowState {
     fn redraw(&self) {
         let _ = self.draw();
     }
+}
+
+/// Draw the image into `rect`. The popup redraws only when something changes, so it makes
+/// the bitmap again each time and keeps no GPU resource between frames.
+fn draw_image(
+    dc: &ID2D1DeviceContext,
+    image: &Image,
+    rect: D2D_RECT_F,
+) -> windows::core::Result<()> {
+    unsafe {
+        let bitmap = dc.CreateBitmap(
+            D2D_SIZE_U {
+                width: image.width,
+                height: image.height,
+            },
+            Some(image.pixels.as_ptr().cast()),
+            image.width * 4,
+            &D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                bitmapOptions: D2D1_BITMAP_OPTIONS_NONE,
+                colorContext: std::mem::ManuallyDrop::new(None),
+            },
+        )?;
+        dc.DrawBitmap(
+            &bitmap,
+            Some(&rect),
+            1.0,
+            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+            None,
+            None,
+        );
+    }
+    Ok(())
 }
 
 pub(super) extern "system" fn wndproc(

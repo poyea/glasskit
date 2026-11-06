@@ -24,6 +24,16 @@ pub enum Error {
     /// [`ChoicePopup::show`](crate::popup::ChoicePopup::show) was called while a prompt of
     /// the same popup showed.
     PopupShowing,
+    /// An image for a popup has no pixels, a side larger than 4096, or a number of pixels
+    /// that is not its width times its height.
+    InvalidImage {
+        /// The width of the image.
+        width: u32,
+        /// The height of the image.
+        height: u32,
+        /// The number of pixels given.
+        pixels: usize,
+    },
     /// The number of pixels of an icon is not the square of its size.
     InvalidIcon {
         /// The width and height of the icon.
@@ -54,6 +64,14 @@ impl fmt::Display for Error {
             Error::CurrentExe(_) => f.write_str("the path of the executable is not available"),
             Error::TrayIconNotAdded => f.write_str("Windows did not add the tray icon"),
             Error::PopupShowing => f.write_str("the popup shows a prompt already"),
+            Error::InvalidImage {
+                width,
+                height,
+                pixels,
+            } => write!(
+                f,
+                "an image of {width} x {height} pixels (each side 1 to 4096) cannot have {pixels} pixels"
+            ),
             Error::InvalidIcon { size, pixels } => write!(
                 f,
                 "an icon of size {size} needs {} pixels, not {pixels}",
