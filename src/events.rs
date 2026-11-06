@@ -9,7 +9,7 @@
 //! a dialog can stay open while popups come and go.
 
 use std::cell::Cell;
-use std::rc::Weak;
+use std::rc::{Rc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
@@ -20,20 +20,18 @@ use windows::Win32::System::Threading::{
     CancelWaitableTimer, CreateWaitableTimerExW, INFINITE, SetWaitableTimer, TIMER_ALL_ACCESS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetWindowLongPtrW, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
-    PeekMessageW, QS_ALLINPUT, SetWindowLongPtrW, TranslateMessage, WM_NCDESTROY, WM_QUIT,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
+    DefWindowProcW, DispatchMessageW, IDC_ARROW, MSG, MWMO_INPUTAVAILABLE,
+    MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT, TranslateMessage, WM_QUIT,
+    WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK,
 };
 use windows::core::{PCWSTR, w};
 
 use crate::Ui;
 use crate::error::{Call, Result};
 use crate::ui::Notice;
+use crate::window::{self, Window};
 
 const CLASS_NAME: PCWSTR = w!("GlasskitEvents");
-const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
-const WTS_SESSION_UNLOCK: usize = 0x8;
 /// Ticks of 100 ns from 1601-01-01 (FILETIME) to 1970-01-01 (Unix).
 const UNIX_EPOCH_AS_FILETIME: i64 = 116_444_736_000_000_000;
 
@@ -75,8 +73,7 @@ pub(crate) trait Source<C> {
 pub struct EventLoop<C> {
     ui: Ui,
     timer: DeadlineTimer,
-    hwnd: HWND,
-    unlocked: *const Cell<bool>,
+    window: Window<Cell<bool>>,
     sources: Vec<Weak<dyn Source<C>>>,
 }
 
@@ -84,41 +81,19 @@ impl<C> EventLoop<C> {
     /// A loop for the windows of this thread.
     pub fn new(ui: &Ui) -> Result<Self> {
         let timer = DeadlineTimer::new()?;
-        crate::register_class(&WNDCLASSEXW {
-            cbSize: size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(wndproc),
-            hInstance: ui.hinstance(),
-            lpszClassName: CLASS_NAME,
-            ..Default::default()
-        })?;
+        let hinstance = ui.hinstance();
+        window::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
+        let hwnd = window::create_hidden(CLASS_NAME, hinstance)?;
+        let window = Window::attach(hwnd, Rc::new(Cell::new(false)));
         unsafe {
-            // Session messages go only to top-level windows. The window stays hidden.
-            let hwnd = CreateWindowExW(
-                WS_EX_TOOLWINDOW,
-                CLASS_NAME,
-                CLASS_NAME,
-                WS_POPUP,
-                0,
-                0,
-                0,
-                0,
-                None,
-                None,
-                Some(ui.hinstance()),
-                None,
-            )
-            .call("CreateWindowExW")?;
-            let unlocked = Box::into_raw(Box::new(Cell::new(false)));
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, unlocked as isize);
             let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
-            Ok(Self {
-                ui: ui.clone(),
-                timer,
-                hwnd,
-                unlocked,
-                sources: Vec::new(),
-            })
         }
+        Ok(Self {
+            ui: ui.clone(),
+            timer,
+            window,
+            sources: Vec::new(),
+        })
     }
 
     /// The setup of the thread that the loop serves.
@@ -162,7 +137,7 @@ impl<C> EventLoop<C> {
                 Some(Notice::Dialog(id)) => return Ok(Event::Dialog(DialogId(id))),
                 None => {}
             }
-            if unsafe { &*self.unlocked }.replace(false) {
+            if self.window.state().replace(false) {
                 return Ok(Event::SessionUnlocked);
             }
             if let Some(t) = until {
@@ -186,29 +161,21 @@ impl<C> EventLoop<C> {
 impl<C> Drop for EventLoop<C> {
     fn drop(&mut self) {
         unsafe {
-            let _ = WTSUnRegisterSessionNotification(self.hwnd);
-            let _ = DestroyWindow(self.hwnd);
-            drop(Box::from_raw(self.unlocked as *mut Cell<bool>));
+            let _ = WTSUnRegisterSessionNotification(self.window.hwnd());
         }
     }
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
-        let unlocked = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Cell<bool>;
-        match msg {
-            WM_WTSSESSION_CHANGE if !unlocked.is_null() => {
-                if wparam.0 == WTS_SESSION_UNLOCK {
-                    (*unlocked).set(true);
-                }
-                LRESULT(0)
+        if let (WM_WTSSESSION_CHANGE, Some(unlocked)) = (msg, window::state_of::<Cell<bool>>(hwnd))
+        {
+            if wparam.0 == WTS_SESSION_UNLOCK as usize {
+                unlocked.set(true);
             }
-            WM_NCDESTROY => {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                DefWindowProcW(hwnd, msg, wparam, lparam)
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+            return LRESULT(0);
         }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 }
 

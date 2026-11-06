@@ -111,6 +111,7 @@ pub mod process;
 mod theme;
 pub mod tray;
 mod ui;
+mod window;
 
 /// Runs the README example as a doc test.
 #[cfg(doctest)]
@@ -121,27 +122,12 @@ pub use error::{Error, Result};
 pub use ui::Ui;
 
 use crate::error::Call;
-use windows::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HANDLE, POINT,
-};
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, POINT};
 use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForSystem, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::WindowsAndMessaging::{
-    MB_ICONERROR, MB_OK, MessageBoxW, RegisterClassExW, WNDCLASSEXW,
-};
+use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
 use windows::core::HSTRING;
-
-/// Register a window class. Windows keeps a class until the process ends. A second
-/// registration is not an error.
-pub(crate) fn register_class(class: &WNDCLASSEXW) -> Result<()> {
-    unsafe {
-        if RegisterClassExW(class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
-            return Err(Error::last("RegisterClassExW"));
-        }
-    }
-    Ok(())
-}
 
 /// The DPI of the primary monitor, read now. The system DPI does not change after sign-in,
 /// so it is only the fallback.

@@ -23,18 +23,18 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DestroyWindow, GWLP_USERDATA, GetCursorPos, GetSystemMetrics, GetWindowLongPtrW,
-    HICON, HMENU, ICONINFO, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, PostMessageW, PostQuitMessage, RegisterWindowMessageW, SM_CXSMICON,
-    SetForegroundWindow, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_LBUTTONUP, WM_NCDESTROY, WM_NULL,
-    WM_RBUTTONUP, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
+    AppendMenuW, CreateIconIndirect, CreatePopupMenu, DefWindowProcW, DestroyIcon, DestroyMenu,
+    GetCursorPos, GetSystemMetrics, HICON, HMENU, ICONINFO, IDC_ARROW, MENU_ITEM_FLAGS, MF_CHECKED,
+    MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, PostQuitMessage,
+    RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_LBUTTONUP, WM_NULL,
+    WM_RBUTTONUP,
 };
 use windows::core::{BOOL, HSTRING, PCSTR, PCWSTR, w};
 
 use crate::error::{Call, Error, Result};
 use crate::events::{EventLoop, Source};
+use crate::window::{self, Window};
 
 const CLASS_NAME: PCWSTR = w!("GlasskitTray");
 /// The numbers of the uxtheme.dll exports for dark menus. They have no names.
@@ -169,16 +169,15 @@ struct Shared {
 
 /// What the event loop asks for commands: the window state and the commands of the menu.
 struct Core<C> {
-    shared: *const Shared,
+    shared: Rc<Shared>,
     commands: RefCell<Vec<C>>,
 }
 
 impl<C: Clone> Source<C> for Core<C> {
     fn take_command(&self) -> Option<C> {
-        let shared = unsafe { &*self.shared };
         loop {
-            let (generation, index) = shared.chosen.borrow_mut().pop_front()?;
-            if generation == shared.generation.get()
+            let (generation, index) = self.shared.chosen.borrow_mut().pop_front()?;
+            if generation == self.shared.generation.get()
                 && let Some(command) = self.commands.borrow().get(index)
             {
                 return Some(command.clone());
@@ -187,12 +186,23 @@ impl<C: Clone> Source<C> for Core<C> {
     }
 }
 
+/// An icon handle that Windows destroys when the value is dropped.
+struct IconHandle(HICON);
+
+impl Drop for IconHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyIcon(self.0);
+        }
+    }
+}
+
 /// A tray icon and its menu. `C` is the command type of the app, for example an enum.
 ///
 /// It gives its commands to the [`EventLoop`] that it was made with.
 pub struct Tray<C> {
-    hwnd: HWND,
-    icon: HICON,
+    window: Window<Shared>,
+    _icon: IconHandle,
     core: Rc<Core<C>>,
 }
 
@@ -201,74 +211,51 @@ impl<C: Clone + 'static> Tray<C> {
     /// [`Tray::set_menu`].
     pub fn new(events: &mut EventLoop<C>, tooltip: &str, icon: &Icon) -> Result<Self> {
         let hinstance = events.ui().hinstance();
-        crate::register_class(&WNDCLASSEXW {
-            cbSize: size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(wndproc),
-            hInstance: hinstance,
-            lpszClassName: CLASS_NAME,
+        window::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
+        let icon = IconHandle(create_icon(icon)?);
+        // Use a hidden top-level window. A message-only window does not get the
+        // TaskbarCreated message when Explorer restarts.
+        let hwnd = window::create_hidden(CLASS_NAME, hinstance)?;
+        let mut data = NOTIFYICONDATAW {
+            cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: hwnd,
+            uID: ICON_ID,
+            uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+            uCallbackMessage: WM_TRAY,
+            hIcon: icon.0,
             ..Default::default()
-        })?;
-        unsafe {
-            // Use a hidden top-level window. A message-only window does not get the
-            // TaskbarCreated message when Explorer restarts.
-            let hwnd = CreateWindowExW(
-                WS_EX_TOOLWINDOW,
-                CLASS_NAME,
-                CLASS_NAME,
-                WS_POPUP,
-                0,
-                0,
-                0,
-                0,
-                None,
-                None,
-                Some(hinstance),
-                None,
-            )
-            .call("CreateWindowExW")?;
-            let icon = match create_icon(icon) {
-                Ok(icon) => icon,
-                Err(err) => {
-                    let _ = DestroyWindow(hwnd);
-                    return Err(err);
-                }
-            };
-            let mut data = NOTIFYICONDATAW {
-                cbSize: size_of::<NOTIFYICONDATAW>() as u32,
-                hWnd: hwnd,
-                uID: ICON_ID,
-                uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
-                uCallbackMessage: WM_TRAY,
-                hIcon: icon,
-                ..Default::default()
-            };
-            set_tip(&mut data, tooltip);
-            let shared = Box::into_raw(Box::new(Shared {
-                entries: RefCell::new(Vec::new()),
-                generation: Cell::new(0),
-                chosen: RefCell::new(VecDeque::new()),
-                icon_data: RefCell::new(data),
-                taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
-            }));
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, shared as isize);
-            allow_dark_menus(hwnd);
+        };
+        set_tip(&mut data, tooltip);
+        let shared = Rc::new(Shared {
+            entries: RefCell::new(Vec::new()),
+            generation: Cell::new(0),
+            chosen: RefCell::new(VecDeque::new()),
+            icon_data: RefCell::new(data),
+            taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
+        });
+        let window = Window::attach(hwnd, Rc::clone(&shared));
+        allow_dark_menus(hwnd);
 
-            let core = Rc::new(Core {
-                shared,
-                commands: RefCell::new(Vec::new()),
-            });
-            let source: Weak<dyn Source<C>> = Rc::downgrade(&core) as Weak<dyn Source<C>>;
-            events.add_source(source);
-            let tray = Self { hwnd, icon, core };
-            if !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
-                return Err(Error::TrayIconNotAdded);
-            }
-            Ok(tray)
+        let core = Rc::new(Core {
+            shared,
+            commands: RefCell::new(Vec::new()),
+        });
+        let source: Weak<dyn Source<C>> = Rc::downgrade(&core) as Weak<dyn Source<C>>;
+        events.add_source(source);
+        let tray = Self {
+            window,
+            _icon: icon,
+            core,
+        };
+        let added = unsafe { Shell_NotifyIconW(NIM_ADD, &data) };
+        if !added.as_bool() {
+            return Err(Error::TrayIconNotAdded);
         }
+        Ok(tray)
     }
 
     fn shared(&self) -> &Shared {
-        unsafe { &*self.core.shared }
+        self.window.state()
     }
 
     /// Replace the menu. A choice that the user made in the old menu and that the event loop
@@ -296,12 +283,7 @@ impl<C: Clone + 'static> Tray<C> {
 impl<C> Drop for Tray<C> {
     fn drop(&mut self) {
         unsafe {
-            let data = (*self.core.shared).icon_data.borrow();
-            let _ = Shell_NotifyIconW(NIM_DELETE, &*data);
-            drop(data);
-            let _ = DestroyIcon(self.icon);
-            let _ = DestroyWindow(self.hwnd);
-            drop(Box::from_raw(self.core.shared as *mut Shared));
+            let _ = Shell_NotifyIconW(NIM_DELETE, &*self.window.state().icon_data.borrow());
         }
     }
 }
@@ -344,11 +326,9 @@ fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
-        let shared = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Shared;
-        if shared.is_null() {
+        let Some(shared) = window::state_of::<Shared>(hwnd) else {
             return DefWindowProcW(hwnd, msg, wparam, lparam);
-        }
-        let shared = &*shared;
+        };
         match msg {
             WM_TRAY => {
                 let event = (lparam.0 & 0xFFFF) as u32;
@@ -361,10 +341,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let data = *shared.icon_data.borrow();
                 let _ = Shell_NotifyIconW(NIM_ADD, &data);
                 LRESULT(0)
-            }
-            WM_NCDESTROY => {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }

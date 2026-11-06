@@ -10,6 +10,7 @@ mod glass;
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
+use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::error::{Call, Error, Result};
@@ -32,14 +33,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetMessageW,
-    GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, IsWindow, KillTimer, LoadCursorW,
-    MA_NOACTIVATE, MSG, PostQuitMessage, SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY,
-    WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HWND_TOPMOST, IDC_ARROW,
+    IDC_HAND, KillTimer, LoadCursorW, MA_NOACTIVATE, MSG, PostQuitMessage, SPI_GETWORKAREA,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SetCursor, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_SETCURSOR,
+    WM_TIMER, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, w};
 use windows_numerics::Vector2;
@@ -49,6 +49,7 @@ use crate::events::PopupId;
 use crate::placement::{Area, Placement, SCREEN_MARGIN};
 use crate::theme::Theme;
 use crate::ui::Notice;
+use crate::window::{self, Window, state_of};
 use glass::{Graphics, Scene};
 
 const CLASS_NAME: PCWSTR = w!("GlasskitChoicePopup");
@@ -237,14 +238,7 @@ impl ChoicePopup {
 
     /// A popup that shows at `placement` in the work area.
     pub fn new(ui: &Ui, placement: Placement) -> Result<Self> {
-        crate::register_class(&WNDCLASSEXW {
-            cbSize: size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(wndproc),
-            hInstance: ui.hinstance(),
-            hCursor: unsafe { LoadCursorW(None, IDC_ARROW) }.call("LoadCursorW")?,
-            lpszClassName: CLASS_NAME,
-            ..Default::default()
-        })?;
+        window::register_class(CLASS_NAME, Some(wndproc), ui.hinstance(), IDC_ARROW)?;
         Ok(Self {
             ui: ui.clone(),
             id: PopupId(ui.new_id()),
@@ -366,12 +360,12 @@ impl ChoicePopup {
             ) {
                 Ok(scene) => scene,
                 Err(err) => {
-                    let _ = DestroyWindow(hwnd);
+                    window::destroy(hwnd);
                     return Err(err);
                 }
             };
 
-            let state = Box::into_raw(Box::new(WindowState {
+            let state = Rc::new(WindowState {
                 id: self.id.0,
                 style: self.style,
                 layout: RefCell::new(layout),
@@ -389,9 +383,9 @@ impl ChoicePopup {
                 pending: Cell::new(None),
                 decided_at: Cell::new(None),
                 response: Cell::new(None),
-            }));
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
-            let shared = &*state;
+            });
+            let window = Window::attach(hwnd, state);
+            let shared = window.state();
 
             let shown = (|| -> Result<()> {
                 shared.draw()?;
@@ -419,16 +413,8 @@ impl ChoicePopup {
                 Ok(())
             })();
 
-            if let Err(err) = shown {
-                let _ = DestroyWindow(hwnd);
-                drop(Box::from_raw(state));
-                return Err(err);
-            }
-            self.active = Some(Active {
-                hwnd,
-                state,
-                _gfx: gfx,
-            });
+            shown?;
+            self.active = Some(Active { window, _gfx: gfx });
             Ok(())
         }
     }
@@ -436,8 +422,7 @@ impl ChoicePopup {
     /// The reply of the prompt, once it has ended. It closes the window and frees its GPU
     /// resources. It gives `None` while the prompt still shows, and when no prompt shows.
     pub fn take_reply(&mut self) -> Option<Reply> {
-        let active = self.active.as_ref()?;
-        let state = unsafe { &*active.state };
+        let state = self.active.as_ref()?.window.state();
         let response = state.response.get()?;
         let at = state.decided_at.get().unwrap_or_else(SystemTime::now);
         self.close();
@@ -446,9 +431,7 @@ impl ChoicePopup {
 
     /// Close the prompt that shows, without a reply.
     pub fn close(&mut self) {
-        if let Some(active) = self.active.take() {
-            active.close();
-        }
+        self.active = None;
     }
 
     /// Show the prompt and wait until it ends, with a message loop of its own. It is for an app
@@ -495,21 +478,9 @@ impl Drop for ChoicePopup {
 
 /// The window of a prompt that shows, and what it needs.
 struct Active {
-    hwnd: HWND,
-    state: *mut WindowState,
+    window: Window<WindowState>,
     /// The GPU resources. They go last, after the window and its scene.
     _gfx: Graphics,
-}
-
-impl Active {
-    fn close(self) {
-        unsafe {
-            if IsWindow(Some(self.hwnd)).as_bool() {
-                let _ = DestroyWindow(self.hwnd);
-            }
-            drop(Box::from_raw(self.state));
-        }
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -823,12 +794,9 @@ impl WindowState {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
-        let state = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut WindowState;
-        if state.is_null() {
+        let Some(state) = state_of::<WindowState>(hwnd) else {
             return DefWindowProcW(hwnd, msg, wparam, lparam);
-        }
-        let state = &*state;
-
+        };
         match msg {
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
             WM_TIMER => {
@@ -914,10 +882,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_DESTROY => {
                 state.finish(Response::Dismissed);
                 LRESULT(0)
-            }
-            WM_NCDESTROY => {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }

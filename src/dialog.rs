@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::fmt;
 use std::marker::PhantomData;
+use std::rc::Rc;
 
 use crate::error::{Call, Error, Result};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -51,21 +52,20 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_OWNERDRAW, CB_ADDSTRING, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN,
     CB_RESETCONTENT, CB_SETCURSEL, CBS_DROPDOWNLIST, CBS_HASSTRINGS, CBS_OWNERDRAWFIXED,
-    CW_USEDEFAULT, CreateWindowExW, DLGC_WANTARROWS, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_NUMBER, ES_WANTRETURN,
-    GWLP_USERDATA, GetClientRect, GetDlgCtrlID, GetDlgItem, GetMessageW, GetParent,
-    GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, IDC_SIZEALL,
-    LB_ADDSTRING, LB_DELETESTRING, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_INSERTSTRING,
-    LB_RESETCONTENT, LB_SETCURSEL, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY,
-    LBS_OWNERDRAWFIXED, LoadCursorW, MB_ICONWARNING, MB_OK, MSG, MessageBoxW, PostQuitMessage,
+    CW_USEDEFAULT, CreateWindowExW, DLGC_WANTARROWS, DefWindowProcW, DispatchMessageW,
+    ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_NUMBER, ES_WANTRETURN, GetClientRect,
+    GetDlgCtrlID, GetDlgItem, GetMessageW, GetParent, GetWindowTextLengthW, GetWindowTextW, HMENU,
+    IDC_ARROW, IDC_SIZEALL, LB_ADDSTRING, LB_DELETESTRING, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN,
+    LB_INSERTSTRING, LB_RESETCONTENT, LB_SETCURSEL, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT,
+    LBS_NOTIFY, LBS_OWNERDRAWFIXED, MB_ICONWARNING, MB_OK, MSG, MessageBoxW, PostQuitMessage,
     SPI_GETWORKAREA, SW_SHOWNORMAL, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow,
     SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED,
     WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DRAWITEM,
     WM_ENABLE, WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SETFONT,
-    WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME,
-    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED,
+    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 use windows_numerics::Vector2;
@@ -75,6 +75,7 @@ use crate::events::DialogId;
 use crate::placement::{Area, Placement, SCREEN_MARGIN};
 use crate::theme::{Theme, colorref, over, rgba};
 use crate::ui::Notice;
+use crate::window::{self, Window, state_of};
 
 const CLASS_NAME: PCWSTR = w!("GlasskitDialog");
 const PLACEMENT_CLASS: PCWSTR = w!("GlasskitPlacement");
@@ -533,12 +534,23 @@ pub struct Dialog {
     ui: Ui,
     id: DialogId,
     shown: bool,
-    hwnd: HWND,
-    font: HFONT,
-    heading_font: HFONT,
+    /// Declared before the fonts, so the window is gone before its fonts.
+    window: Window<Shared>,
+    font: Font,
+    heading_font: Font,
     scale: f32,
     controls: Vec<HWND>,
-    shared: *const Shared,
+}
+
+/// A font that Windows deletes when the value is dropped.
+struct Font(HFONT);
+
+impl Drop for Font {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DeleteObject(HGDIOBJ(self.0.0));
+        }
+    }
 }
 
 impl Dialog {
@@ -547,22 +559,13 @@ impl Dialog {
     pub fn new(ui: &Ui, title: &str, width: i32, height: i32) -> Result<Self> {
         let hinstance = ui.hinstance();
         unsafe {
-            crate::register_class(&WNDCLASSEXW {
-                cbSize: size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(wndproc),
-                hInstance: hinstance,
-                hCursor: LoadCursorW(None, IDC_ARROW).call("LoadCursorW")?,
-                lpszClassName: CLASS_NAME,
-                ..Default::default()
-            })?;
-            crate::register_class(&WNDCLASSEXW {
-                cbSize: size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(placement_proc),
-                hInstance: hinstance,
-                hCursor: LoadCursorW(None, IDC_SIZEALL).call("LoadCursorW")?,
-                lpszClassName: PLACEMENT_CLASS,
-                ..Default::default()
-            })?;
+            window::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
+            window::register_class(
+                PLACEMENT_CLASS,
+                Some(placement_proc),
+                hinstance,
+                IDC_SIZEALL,
+            )?;
 
             let dpi = crate::primary_monitor_dpi();
             let scale = dpi as f32 / 96.0;
@@ -605,22 +608,24 @@ impl Dialog {
             set_dwm_attribute(hwnd, DWMWA_TEXT_COLOR, look.text().0);
 
             let id = ui.new_id();
-            let shared = Box::into_raw(Box::new(Shared {
-                kinds: RefCell::new(Vec::new()),
-                surfaces: RefCell::new(Vec::new()),
-                checked: RefCell::new(Vec::new()),
-                cards: RefCell::new(Vec::new()),
-                fields: RefCell::new(Vec::new()),
-                placements: RefCell::new(Vec::new()),
-                window_sizes: RefCell::new(Vec::new()),
-                grab: Cell::new(None),
-                hover: Cell::new(None),
-                id,
-                events: RefCell::new(VecDeque::new()),
-                muted: Cell::new(false),
-                look,
-            }));
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, shared as isize);
+            let window = Window::attach(
+                hwnd,
+                Rc::new(Shared {
+                    kinds: RefCell::new(Vec::new()),
+                    surfaces: RefCell::new(Vec::new()),
+                    checked: RefCell::new(Vec::new()),
+                    cards: RefCell::new(Vec::new()),
+                    fields: RefCell::new(Vec::new()),
+                    placements: RefCell::new(Vec::new()),
+                    window_sizes: RefCell::new(Vec::new()),
+                    grab: Cell::new(None),
+                    hover: Cell::new(None),
+                    id,
+                    events: RefCell::new(VecDeque::new()),
+                    muted: Cell::new(false),
+                    look,
+                }),
+            );
 
             let mut work = RECT::default();
             if SystemParametersInfoW(
@@ -640,18 +645,17 @@ impl Dialog {
                 ui: ui.clone(),
                 id: DialogId(id),
                 shown: false,
-                hwnd,
-                font: ui_font(scale, FW_NORMAL.0 as i32),
-                heading_font: ui_font(scale, FW_SEMIBOLD.0 as i32),
+                window,
+                font: Font(ui_font(scale, FW_NORMAL.0 as i32)),
+                heading_font: Font(ui_font(scale, FW_SEMIBOLD.0 as i32)),
                 scale,
                 controls: Vec::new(),
-                shared,
             })
         }
     }
 
     fn shared(&self) -> &Shared {
-        unsafe { &*self.shared }
+        self.window.state()
     }
 
     fn add(&mut self, control: Control, bounds: Bounds) -> Result<usize> {
@@ -817,7 +821,7 @@ impl Dialog {
                 inner.top,
                 inner.right - inner.left,
                 height,
-                Some(self.hwnd),
+                Some(self.window.hwnd()),
                 Some(HMENU(id as *mut c_void)),
                 None,
                 None,
@@ -837,8 +841,8 @@ impl Dialog {
             }
         };
         let font = match control {
-            Control::Group(_) => self.heading_font,
-            _ => self.font,
+            Control::Group(_) => self.heading_font.0,
+            _ => self.font.0,
         };
         unsafe {
             SendMessageW(
@@ -853,7 +857,8 @@ impl Dialog {
                 let _ = SetWindowTheme(hwnd, w!("DarkMode_Explorer"), PCWSTR::null());
             }
             if matches!(kind, Kind::Button | Kind::Check | Kind::DropDown) {
-                let _ = SetWindowSubclass(hwnd, Some(themed_control), index, self.shared as usize);
+                let shared = self.shared() as *const Shared as usize;
+                let _ = SetWindowSubclass(hwnd, Some(themed_control), index, shared);
             }
         }
         self.controls.push(hwnd);
@@ -1058,7 +1063,7 @@ impl Dialog {
     pub fn warn(&self, title: &str, message: &str) {
         unsafe {
             MessageBoxW(
-                Some(self.hwnd),
+                Some(self.window.hwnd()),
                 &HSTRING::from(message),
                 &HSTRING::from(title),
                 MB_OK | MB_ICONWARNING,
@@ -1081,13 +1086,13 @@ impl Dialog {
             return;
         }
         self.shown = true;
-        self.ui.add_dialog(self.hwnd);
+        self.ui.add_dialog(self.window.hwnd());
         unsafe {
             // The first ShowWindow call of a process can use the show state of the parent,
             // such as hidden. The second call uses the state that is wanted.
-            let _ = ShowWindow(self.hwnd, SW_SHOWNORMAL);
-            let _ = ShowWindow(self.hwnd, SW_SHOWNORMAL);
-            let _ = SetForegroundWindow(self.hwnd);
+            let _ = ShowWindow(self.window.hwnd(), SW_SHOWNORMAL);
+            let _ = ShowWindow(self.window.hwnd(), SW_SHOWNORMAL);
+            let _ = SetForegroundWindow(self.window.hwnd());
         }
         if let Some(first) =
             (0..self.controls.len()).find(|&index| self.kind(index) != Kind::Static)
@@ -1135,14 +1140,7 @@ impl Dialog {
 
 impl Drop for Dialog {
     fn drop(&mut self) {
-        self.ui.remove_dialog(self.hwnd);
-        unsafe {
-            let _ = DestroyWindow(self.hwnd);
-            for font in [self.font, self.heading_font] {
-                let _ = DeleteObject(HGDIOBJ(font.0));
-            }
-            drop(Box::from_raw(self.shared as *mut Shared));
-        }
+        self.ui.remove_dialog(self.window.hwnd());
     }
 }
 
@@ -1659,11 +1657,9 @@ fn control_colors(shared: &Shared, msg: u32, hdc: HDC, child: HWND) -> LRESULT {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
-        let shared = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Shared;
-        if shared.is_null() {
+        let Some(shared) = state_of::<Shared>(hwnd) else {
             return DefWindowProcW(hwnd, msg, wparam, lparam);
-        }
-        let shared = &*shared;
+        };
         match msg {
             WM_ERASEBKGND => {
                 paint_background(shared, hwnd, HDC(wparam.0 as *mut c_void));
@@ -1772,10 +1768,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_CLOSE => {
                 shared.push(Event::Close);
                 LRESULT(0)
-            }
-            WM_NCDESTROY => {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
@@ -1999,11 +1991,9 @@ fn user_placement(shared: &Shared, index: usize, hwnd: HWND, placement: Placemen
 extern "system" fn placement_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         let parent = GetParent(hwnd).unwrap_or_default();
-        let shared = GetWindowLongPtrW(parent, GWLP_USERDATA) as *const Shared;
-        if shared.is_null() {
+        let Some(shared) = state_of::<Shared>(parent) else {
             return DefWindowProcW(hwnd, msg, wparam, lparam);
-        }
-        let shared = &*shared;
+        };
         let Some(index) = shared.index_of(hwnd) else {
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         };
