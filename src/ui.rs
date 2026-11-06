@@ -26,6 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::error::{Call, Error, Result};
+use crate::placement::Rect;
 
 thread_local! {
     static CURRENT: RefCell<Weak<Inner>> = const { RefCell::new(Weak::new()) };
@@ -45,6 +46,8 @@ struct Inner {
     notices: RefCell<VecDeque<Notice>>,
     /// The dialogs that show now. The message loops give them their keyboard messages.
     dialogs: RefCell<Vec<HWND>>,
+    /// The popups that show now, so that a new popup does not cover them.
+    popups: RefCell<Vec<(u32, Rect)>>,
 }
 
 /// Proof that the current thread is set up for `glasskit` windows.
@@ -98,6 +101,7 @@ impl Ui {
                 next_id: Cell::new(1),
                 notices: RefCell::new(VecDeque::new()),
                 dialogs: RefCell::new(Vec::new()),
+                popups: RefCell::new(Vec::new()),
             });
             CURRENT.set(Rc::downgrade(&inner));
             Ok(Self { inner })
@@ -144,6 +148,19 @@ impl Ui {
         }
     }
 
+    pub(crate) fn popup_rects(&self) -> Vec<Rect> {
+        self.inner.popups.borrow().iter().map(|&(_, r)| r).collect()
+    }
+
+    /// Keep `rect` for popup `id` until the slot drops.
+    pub(crate) fn claim_popup_rect(&self, id: u32, rect: Rect) -> PopupSlot {
+        self.inner.popups.borrow_mut().push((id, rect));
+        PopupSlot {
+            ui: self.clone(),
+            id,
+        }
+    }
+
     /// Dispatch the messages that wait now. It gives true if one of them is `WM_QUIT`.
     pub(crate) fn pump_pending(&self) -> bool {
         let mut msg = MSG::default();
@@ -173,6 +190,22 @@ impl Ui {
                 Ok(true)
             }
         }
+    }
+}
+
+/// The place of a popup that shows. Dropping it frees the place.
+pub(crate) struct PopupSlot {
+    ui: Ui,
+    id: u32,
+}
+
+impl Drop for PopupSlot {
+    fn drop(&mut self) {
+        self.ui
+            .inner
+            .popups
+            .borrow_mut()
+            .retain(|&(id, _)| id != self.id);
     }
 }
 

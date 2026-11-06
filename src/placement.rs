@@ -97,6 +97,55 @@ impl From<(i32, i32, i32, i32)> for Area {
     }
 }
 
+/// A window rectangle on the screen, in whole pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl Rect {
+    fn overlaps(&self, other: &Rect) -> bool {
+        self.x < other.x + other.width
+            && other.x < self.x + self.width
+            && self.y < other.y + other.height
+            && other.y < self.y + self.height
+    }
+}
+
+/// Move `rect` up (or down) past the windows in `others` that it covers, with `gap` pixels
+/// between them. If the result does not fit between `top` and `bottom`, it gives `rect`
+/// as it was: a window that covers another is better than a window off the screen.
+pub(crate) fn stack(
+    rect: Rect,
+    others: &[Rect],
+    up: bool,
+    gap: i32,
+    top: i32,
+    bottom: i32,
+) -> Rect {
+    let mut moved = rect;
+    // Each step moves past one more window, so there are at most `others.len()` steps.
+    for _ in 0..others.len() {
+        let Some(hit) = others.iter().find(|other| moved.overlaps(other)) else {
+            break;
+        };
+        moved.y = if up {
+            hit.y - gap - moved.height
+        } else {
+            hit.y + hit.height + gap
+        };
+    }
+    let fits = moved.y >= top && moved.y + moved.height <= bottom;
+    if fits && !others.iter().any(|other| moved.overlaps(other)) {
+        moved
+    } else {
+        rect
+    }
+}
+
 fn along(start: f32, end: f32, size: f32, margin: f32, fraction: f32) -> f32 {
     let free = end - start - 2.0 * margin - size;
     (start + margin + fraction * free).max(start)
@@ -113,6 +162,37 @@ fn fraction_at(start: f32, end: f32, size: f32, margin: f32, position: f32) -> f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rect(y: i32) -> Rect {
+        Rect {
+            x: 600,
+            y,
+            width: 360,
+            height: 200,
+        }
+    }
+
+    #[test]
+    fn a_free_place_stays() {
+        assert_eq!(stack(rect(500), &[rect(100)], true, 8, 0, 800), rect(500));
+    }
+
+    #[test]
+    fn a_popup_goes_above_the_ones_that_show() {
+        let others = [rect(588), rect(380)];
+        assert_eq!(stack(rect(588), &others, true, 8, 0, 800), rect(172));
+    }
+
+    #[test]
+    fn a_popup_goes_below_from_the_top() {
+        assert_eq!(stack(rect(12), &[rect(12)], false, 8, 0, 800), rect(220));
+    }
+
+    #[test]
+    fn a_full_stack_keeps_the_first_place() {
+        let others = [rect(588), rect(380), rect(172)];
+        assert_eq!(stack(rect(588), &others, true, 8, 0, 800), rect(588));
+    }
 
     const AREA: Area = Area {
         left: 0.0,

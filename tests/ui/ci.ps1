@@ -56,11 +56,38 @@ function Find-Window($Process, [string] $Class, [int] $TimeoutMs = 10000) {
     throw "No $Class window after $TimeoutMs ms."
 }
 
+# The rectangle around all windows of this class of the process.
+function Get-Bounds($Process, [string] $Class) {
+    $all = $null
+    $hwnd = [IntPtr]::Zero
+    while ($true) {
+        $hwnd = [GlassUi]::FindWindowExW([IntPtr]::Zero, $hwnd, $Class, [IntPtr]::Zero)
+        if ($hwnd -eq [IntPtr]::Zero) { break }
+        $owner = 0
+        [GlassUi]::GetWindowThreadProcessId($hwnd, [ref] $owner) | Out-Null
+        if ($owner -ne $Process.Id) { continue }
+        $r = New-Object GlassUi+RECT
+        [GlassUi]::GetWindowRect($hwnd, [ref] $r) | Out-Null
+        if ($null -eq $all) {
+            $all = $r
+        } else {
+            $all.Left = [math]::Min($all.Left, $r.Left)
+            $all.Top = [math]::Min($all.Top, $r.Top)
+            $all.Right = [math]::Max($all.Right, $r.Right)
+            $all.Bottom = [math]::Max($all.Bottom, $r.Bottom)
+        }
+    }
+    $all
+}
+
 # A popup draws through the compositor, so only a copy of the screen shows it. A dialog is a
 # normal window, and PrintWindow gets it also if another window covers it.
-function Save-Picture([IntPtr] $Hwnd, [string] $Name, [switch] $FromScreen) {
-    $r = New-Object GlassUi+RECT
-    [GlassUi]::GetWindowRect($Hwnd, [ref] $r) | Out-Null
+function Save-Picture([IntPtr] $Hwnd, [string] $Name, [switch] $FromScreen, $Rect = $null) {
+    $r = $Rect
+    if ($null -eq $r) {
+        $r = New-Object GlassUi+RECT
+        [GlassUi]::GetWindowRect($Hwnd, [ref] $r) | Out-Null
+    }
     $width, $height = ($r.Right - $r.Left), ($r.Bottom - $r.Top)
     $picture = New-Object System.Drawing.Bitmap $width, $height
     $graphics = [System.Drawing.Graphics]::FromImage($picture)
@@ -104,7 +131,7 @@ foreach ($kind in $kinds) {
             $hwnd = Find-Window $p 'GlasskitChoicePopup'
             # Wait for the fade-in to end.
             Start-Sleep -Milliseconds 1000
-            Save-Picture $hwnd "popup-$kind" -FromScreen
+            Save-Picture $hwnd "popup-$kind" -FromScreen -Rect (Get-Bounds $p 'GlasskitChoicePopup')
         } finally {
             Stop-App $p
         }

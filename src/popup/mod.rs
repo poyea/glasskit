@@ -32,8 +32,9 @@ use windows::core::{BOOL, PCWSTR, w};
 use crate::Ui;
 use crate::error::{Call, Error, Result};
 use crate::events::PopupId;
-use crate::placement::{Area, Placement, SCREEN_MARGIN};
+use crate::placement::{self, Area, Placement, Rect, SCREEN_MARGIN};
 use crate::theme::Theme;
+use crate::ui::PopupSlot;
 use crate::window::{self, Window};
 use countdown::{label, whole_seconds};
 use glass::{Graphics, Scene};
@@ -41,6 +42,8 @@ pub use prompt::{Mark, PopupStyle, Prompt};
 use state::{WindowState, wndproc};
 
 const CLASS_NAME: PCWSTR = w!("GlasskitChoicePopup");
+/// The space between two popups that show together, at 100% display scale.
+const STACK_GAP: f32 = 8.0;
 
 /// How a popup ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +71,11 @@ pub struct Reply {
 ///
 /// It keeps no window between prompts: [`ChoicePopup::show`] makes the window and the GPU
 /// resources, and [`ChoicePopup::take_reply`] frees them.
+///
+/// To ask more than one prompt at a time, make more popups with the same [`Ui`]. A popup
+/// that shows does not cover the others: it goes above them when its placement is in the
+/// lower half of the work area, and below them when it is in the upper half. If there is no
+/// space, it shows at its own place.
 pub struct ChoicePopup {
     ui: Ui,
     id: PopupId,
@@ -79,6 +87,7 @@ pub struct ChoicePopup {
 /// The window of a prompt that shows, and what it needs.
 struct Active {
     window: Window<WindowState>,
+    _slot: PopupSlot,
     /// The GPU resources. They go last, after the window and its scene.
     _gfx: Graphics,
 }
@@ -138,7 +147,15 @@ impl ChoicePopup {
         let content = layout::Content::of(request, dismiss_label);
         let layout = layout::build(scale, self.style.width, &gfx, &fonts, &content)?;
         let theme = Theme::current();
-        let hwnd = create_window(self.ui.hinstance(), &layout, self.placement, scale, &theme)?;
+        let others = self.ui.popup_rects();
+        let (hwnd, rect) = create_window(
+            self.ui.hinstance(),
+            &layout,
+            self.placement,
+            scale,
+            &theme,
+            &others,
+        )?;
         let scene = match Scene::new(
             &gfx,
             hwnd,
@@ -166,6 +183,7 @@ impl ChoicePopup {
         handle.state().open(hwnd)?;
         self.active = Some(Active {
             window: handle,
+            _slot: self.ui.claim_popup_rect(self.id.0, rect),
             _gfx: gfx,
         });
         Ok(())
@@ -230,7 +248,8 @@ fn create_window(
     placement: Placement,
     scale: f32,
     theme: &Theme,
-) -> Result<HWND> {
+    others: &[Rect],
+) -> Result<(HWND, Rect)> {
     unsafe {
         let mut work = RECT::default();
         SystemParametersInfoW(
@@ -248,6 +267,20 @@ fn create_window(
             win_h,
             margin,
         );
+        let rect = placement::stack(
+            Rect {
+                x,
+                y,
+                width: win_w,
+                height: win_h,
+            },
+            others,
+            placement.y() > 0.5,
+            (STACK_GAP * scale).round() as i32,
+            work.top,
+            work.bottom,
+        );
+        let (x, y) = (rect.x, rect.y);
         let hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
             CLASS_NAME,
@@ -271,7 +304,7 @@ fn create_window(
             DWMWA_USE_IMMERSIVE_DARK_MODE,
             BOOL::from(theme.dark).0,
         );
-        Ok(hwnd)
+        Ok((hwnd, rect))
     }
 }
 

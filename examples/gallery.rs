@@ -12,7 +12,8 @@ use glasskit::Ui;
 use glasskit::placement::Placement;
 use glasskit::popup::{ChoicePopup, Prompt};
 
-const KINDS: &[&str] = &["plain", "countdown", "markup"];
+/// The kinds of popup. "stack" shows two popups at once: the second goes above the first.
+const KINDS: &[&str] = &["plain", "countdown", "markup", "stack"];
 
 fn prompt(kind: &str) -> Option<Prompt> {
     Some(match kind {
@@ -20,6 +21,7 @@ fn prompt(kind: &str) -> Option<Prompt> {
         "countdown" => Prompt::new("Take a short break?", ["Yes", "Later"])
             .dismiss_label("Skip")
             .auto_dismiss(Some(Duration::from_secs(90))),
+        "stack" => Prompt::new("And a second question?", ["Yes", "No"]),
         "markup" => Prompt::new(
             "What does **`git stash`** do with your *uncommitted* changes?",
             ["Saves them aside", "Deletes them", "Commits them"],
@@ -36,6 +38,10 @@ fn main() -> glasskit::Result<()> {
         return Ok(());
     };
     let ui = Ui::new()?;
+    let mut first = ChoicePopup::new(&ui, Placement::default())?;
+    if kind == "stack" {
+        first.show(&Prompt::new("A first question?", ["Yes", "No"]))?;
+    }
     let mut popup = ChoicePopup::new(&ui, Placement::default())?;
     println!("{:?}", popup.ask(&prompt)?.response);
     Ok(())
