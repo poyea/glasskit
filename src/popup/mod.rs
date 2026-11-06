@@ -50,17 +50,13 @@ use crate::theme::Theme;
 use glass::{Graphics, Scene};
 
 const CLASS_NAME: PCWSTR = w!("GlasskitChoicePopup");
-const FADE_DURATION: Duration = Duration::from_millis(300);
-/// The window closes this long after the fade-out starts. The extra time lets the last frame show.
-const FADE_OUT_CLOSE: Duration = Duration::from_millis(350);
+/// The window closes this long after the end of the fade-out, so that the last frame shows.
+const FADE_OUT_EXTRA: Duration = Duration::from_millis(50);
 const COUNTDOWN_TICK: Duration = Duration::from_millis(200);
-/// How long the popup shows the result of a choice before it fades out.
-const FEEDBACK_HOLD: Duration = Duration::from_millis(1500);
 const TIMER_COUNTDOWN: usize = 1;
 const TIMER_FADE_OUT: usize = 2;
 const TIMER_FEEDBACK: usize = 3;
 
-const WIDTH: f32 = 360.0;
 const PADDING: f32 = 18.0;
 const TEXT_GAP: f32 = 14.0;
 const BUTTON_MIN_HEIGHT: f32 = 36.0;
@@ -71,8 +67,6 @@ const WINDOW_RADIUS: f32 = 8.0;
 const DISMISS_MIN_WIDTH: f32 = 72.0;
 const DISMISS_TEXT_PADDING: f32 = 12.0;
 const DISMISS_HEIGHT: f32 = 28.0;
-const PROMPT_FONT: f32 = 16.0;
-const BUTTON_FONT: f32 = 14.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// How a popup ended.
@@ -132,7 +126,7 @@ impl<'a> Prompt<'a> {
 
     /// Show a result after a click on a choice. `marks` gets the index of the clicked choice
     /// and gives the buttons to mark, as pairs of a choice index and a [`Mark`]. The popup
-    /// shows the marks for a moment, then fades out. Indexes out
+    /// shows the marks for [`PopupStyle::hold`], then fades out. Indexes out
     /// of range are ignored.
     ///
     /// For a quiz with the correct answer at index 1:
@@ -180,6 +174,34 @@ impl<'a> Prompt<'a> {
     }
 }
 
+/// How a [`ChoicePopup`] looks and moves. Sizes are in pixels at 100% display scale; the popup
+/// scales them to the display.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PopupStyle {
+    /// The width of the popup. Its height follows from the content.
+    pub width: f32,
+    /// The size of the prompt text.
+    pub text_size: f32,
+    /// The size of the button text.
+    pub button_text_size: f32,
+    /// How long the popup takes to fade in, and to fade out after a countdown or marks.
+    pub fade: Duration,
+    /// How long the popup shows the marks of a click before it fades out.
+    pub hold: Duration,
+}
+
+impl Default for PopupStyle {
+    fn default() -> Self {
+        Self {
+            width: 360.0,
+            text_size: 16.0,
+            button_text_size: 14.0,
+            fade: Duration::from_millis(300),
+            hold: Duration::from_millis(1500),
+        }
+    }
+}
+
 /// A popup that asks one [`Prompt`] at a time.
 ///
 /// It keeps no window between prompts: [`ChoicePopup::ask`] makes the window and the GPU
@@ -187,6 +209,7 @@ impl<'a> Prompt<'a> {
 pub struct ChoicePopup {
     ui: Ui,
     placement: Placement,
+    style: PopupStyle,
 }
 
 fn primary_monitor_scale() -> f32 {
@@ -199,6 +222,11 @@ struct Fonts {
 }
 
 impl ChoicePopup {
+    /// The next popup uses this style.
+    pub fn set_style(&mut self, style: PopupStyle) {
+        self.style = style;
+    }
+
     /// The next popup shows at this place in the work area.
     pub fn set_placement(&mut self, placement: Placement) {
         self.placement = placement;
@@ -217,6 +245,7 @@ impl ChoicePopup {
         Ok(Self {
             ui: ui.clone(),
             placement,
+            style: PopupStyle::default(),
         })
     }
 
@@ -231,8 +260,16 @@ impl ChoicePopup {
         let scale = primary_monitor_scale();
         let gfx = Graphics::new()?;
         let fonts = Fonts {
-            prompt: gfx.text_format(PROMPT_FONT * scale, DWRITE_FONT_WEIGHT_SEMI_BOLD, false)?,
-            button: gfx.text_format(BUTTON_FONT * scale, DWRITE_FONT_WEIGHT_NORMAL, true)?,
+            prompt: gfx.text_format(
+                self.style.text_size * scale,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                false,
+            )?,
+            button: gfx.text_format(
+                self.style.button_text_size * scale,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                true,
+            )?,
         };
         let countdown = auto_dismiss.map(|left| Countdown {
             left,
@@ -243,7 +280,15 @@ impl ChoicePopup {
             Some(c) => countdown_label(dismiss, c.shown),
             None => dismiss.to_string(),
         };
-        let layout = layout(scale, &gfx, &fonts, prompt, choices, &dismiss_label)?;
+        let layout = layout(
+            scale,
+            self.style.width,
+            &gfx,
+            &fonts,
+            prompt,
+            choices,
+            &dismiss_label,
+        )?;
         let theme = Theme::current();
         let (win_w, win_h) = (layout.width as i32, layout.height.ceil() as i32);
 
@@ -304,6 +349,7 @@ impl ChoicePopup {
             };
 
             let state = Box::into_raw(Box::new(WindowState {
+                style: self.style,
                 layout: RefCell::new(layout),
                 scene,
                 theme,
@@ -336,7 +382,7 @@ impl ChoicePopup {
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                 )
                 .call("SetWindowPos")?;
-                shared.scene.fade(0.0, 1.0, FADE_DURATION)?;
+                shared.scene.fade(0.0, 1.0, shared.style.fade)?;
                 if let Some(c) = shared.countdown.borrow_mut().as_mut() {
                     c.last_tick = Instant::now();
                     SetTimer(
@@ -386,8 +432,10 @@ impl ChoicePopup {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout<S: AsRef<str>>(
     scale: f32,
+    width: f32,
     gfx: &Graphics,
     fonts: &Fonts,
     prompt: &str,
@@ -395,7 +443,7 @@ fn layout<S: AsRef<str>>(
     dismiss: &str,
 ) -> Result<Layout> {
     let s = |v: f32| (v * scale).round();
-    let width = s(WIDTH);
+    let width = s(width);
     let pad = s(PADDING);
     let inner = width - 2.0 * pad;
 
@@ -483,6 +531,7 @@ fn countdown_label(dismiss: &str, seconds: u64) -> String {
 /// is in `Cell` and `RefCell`. Handlers do not destroy the window: they set `response`, and the
 /// loop in `ChoicePopup::ask` destroys the window.
 struct WindowState {
+    style: PopupStyle,
     layout: RefCell<Layout>,
     scene: Scene,
     theme: Theme,
@@ -567,7 +616,7 @@ impl WindowState {
             SetTimer(
                 Some(hwnd),
                 TIMER_FEEDBACK,
-                FEEDBACK_HOLD.as_millis() as u32,
+                self.style.hold.as_millis() as u32,
                 None,
             ) != 0
         };
@@ -580,12 +629,12 @@ impl WindowState {
         self.close_input(hwnd);
         self.pending.set(Some(response));
         unsafe {
-            let started = match self.scene.fade(1.0, 0.0, FADE_DURATION) {
+            let started = match self.scene.fade(1.0, 0.0, self.style.fade) {
                 Ok(()) => {
                     SetTimer(
                         Some(hwnd),
                         TIMER_FADE_OUT,
-                        FADE_OUT_CLOSE.as_millis() as u32,
+                        (self.style.fade + FADE_OUT_EXTRA).as_millis() as u32,
                         None,
                     ) != 0
                 }
@@ -820,5 +869,19 @@ mod tests {
             p.marks,
             Some(vec![vec![(0, Mark::Good)], vec![(0, Mark::Good)]])
         );
+    }
+}
+
+#[cfg(test)]
+mod style_tests {
+    use super::*;
+
+    #[test]
+    fn default_style_keeps_the_old_look() {
+        let style = PopupStyle::default();
+        assert_eq!(style.width, 360.0);
+        assert_eq!((style.text_size, style.button_text_size), (16.0, 14.0));
+        assert_eq!(style.fade, Duration::from_millis(300));
+        assert_eq!(style.hold, Duration::from_millis(1500));
     }
 }
