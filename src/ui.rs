@@ -20,9 +20,12 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
-use windows::Win32::UI::WindowsAndMessaging::{IsDialogMessageW, MSG, PostMessageW, WM_NULL};
+use windows::Win32::UI::WindowsAndMessaging::{
+    DispatchMessageW, GetMessageW, IsDialogMessageW, MSG, PM_REMOVE, PeekMessageW, PostMessageW,
+    PostQuitMessage, TranslateMessage, WM_NULL, WM_QUIT,
+};
 
-use crate::error::{Call, Result};
+use crate::error::{Call, Error, Result};
 
 thread_local! {
     static CURRENT: RefCell<Weak<Inner>> = const { RefCell::new(Weak::new()) };
@@ -129,6 +132,46 @@ impl Ui {
         dialogs
             .into_iter()
             .any(|hwnd| unsafe { IsDialogMessageW(hwnd, msg) }.as_bool())
+    }
+
+    fn dispatch(&self, msg: &MSG) {
+        if !self.dialog_message(msg) {
+            unsafe {
+                let _ = TranslateMessage(msg);
+                DispatchMessageW(msg);
+            }
+        }
+    }
+
+    /// Dispatch the messages that wait now. It gives true if one of them is `WM_QUIT`.
+    pub(crate) fn pump_pending(&self) -> bool {
+        let mut msg = MSG::default();
+        unsafe {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                if msg.message == WM_QUIT {
+                    return true;
+                }
+                self.dispatch(&msg);
+            }
+        }
+        false
+    }
+
+    /// Wait for one message and dispatch it. It gives false on `WM_QUIT`, after it posts
+    /// `WM_QUIT` again for the caller.
+    pub(crate) fn pump_wait(&self) -> Result<bool> {
+        let mut msg = MSG::default();
+        match unsafe { GetMessageW(&mut msg, None, 0, 0).0 } {
+            0 => {
+                unsafe { PostQuitMessage(msg.wParam.0 as i32) };
+                Ok(false)
+            }
+            -1 => Err(Error::last("GetMessageW")),
+            _ => {
+                self.dispatch(&msg);
+                Ok(true)
+            }
+        }
     }
 }
 

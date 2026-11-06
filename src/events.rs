@@ -20,8 +20,7 @@ use windows::Win32::System::Threading::{
     CancelWaitableTimer, CreateWaitableTimerExW, INFINITE, SetWaitableTimer, TIMER_ALL_ACCESS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, DispatchMessageW, IDC_ARROW, MSG, MWMO_INPUTAVAILABLE,
-    MsgWaitForMultipleObjectsEx, PM_REMOVE, PeekMessageW, QS_ALLINPUT, TranslateMessage, WM_QUIT,
+    DefWindowProcW, IDC_ARROW, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, QS_ALLINPUT,
     WM_WTSSESSION_CHANGE, WTS_SESSION_UNLOCK,
 };
 use windows::core::{PCWSTR, w};
@@ -113,18 +112,8 @@ impl<C> EventLoop<C> {
             self.timer.cancel();
         }
         loop {
-            unsafe {
-                let mut msg = MSG::default();
-                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                    if msg.message == WM_QUIT {
-                        return Ok(Event::Quit);
-                    }
-                    if self.ui.dialog_message(&msg) {
-                        continue;
-                    }
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
+            if self.ui.pump_pending() {
+                return Ok(Event::Quit);
             }
             self.sources.retain(|s| s.strong_count() > 0);
             for source in &self.sources {

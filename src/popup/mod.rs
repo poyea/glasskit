@@ -33,13 +33,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HWND_TOPMOST, IDC_ARROW,
-    IDC_HAND, KillTimer, LoadCursorW, MA_NOACTIVATE, MSG, PostQuitMessage, SPI_GETWORKAREA,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    SetCursor, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_SETCURSOR,
-    WM_TIMER, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    CreateWindowExW, DefWindowProcW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LoadCursorW,
+    MA_NOACTIVATE, SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor, SetTimer, SetWindowPos, ShowWindow,
+    SystemParametersInfoW, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_SETCURSOR, WM_TIMER, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, w};
 use windows_numerics::Vector2;
@@ -440,31 +439,24 @@ impl ChoicePopup {
     /// again for the caller, and gives [`Response::Quit`].
     pub fn ask(&mut self, request: &Prompt) -> Result<Reply> {
         self.show(request)?;
-        let mut msg = MSG::default();
         loop {
             if let Some(reply) = self.take_reply() {
                 return Ok(reply);
             }
-            match unsafe { GetMessageW(&mut msg, None, 0, 0).0 } {
-                0 => {
+            match self.ui.pump_wait() {
+                Ok(true) => {}
+                Ok(false) => {
                     let at = SystemTime::now();
                     self.close();
-                    unsafe { PostQuitMessage(msg.wParam.0 as i32) };
                     return Ok(Reply {
                         response: Response::Quit,
                         at,
                     });
                 }
-                -1 => {
+                Err(err) => {
                     self.close();
-                    return Err(Error::last("GetMessageW"));
+                    return Err(err);
                 }
-                _ => unsafe {
-                    if !self.ui.dialog_message(&msg) {
-                        let _ = TranslateMessage(&msg);
-                        DispatchMessageW(&msg);
-                    }
-                },
             }
         }
     }

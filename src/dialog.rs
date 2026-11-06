@@ -11,7 +11,7 @@ use std::fmt;
 use std::marker::PhantomData;
 use std::rc::Rc;
 
-use crate::error::{Call, Error, Result};
+use crate::error::{Call, Result};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D1_ALPHA_MODE_IGNORE, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
@@ -52,20 +52,20 @@ use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindow
 use windows::Win32::UI::WindowsAndMessaging::{
     BS_OWNERDRAW, CB_ADDSTRING, CB_GETCURSEL, CB_GETDROPPEDSTATE, CB_GETLBTEXT, CB_GETLBTEXTLEN,
     CB_RESETCONTENT, CB_SETCURSEL, CBS_DROPDOWNLIST, CBS_HASSTRINGS, CBS_OWNERDRAWFIXED,
-    CW_USEDEFAULT, CreateWindowExW, DLGC_WANTARROWS, DefWindowProcW, DispatchMessageW,
-    ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_NUMBER, ES_WANTRETURN, GetClientRect,
-    GetDlgCtrlID, GetDlgItem, GetMessageW, GetParent, GetWindowTextLengthW, GetWindowTextW, HMENU,
-    IDC_ARROW, IDC_SIZEALL, LB_ADDSTRING, LB_DELETESTRING, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN,
-    LB_INSERTSTRING, LB_RESETCONTENT, LB_SETCURSEL, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT,
-    LBS_NOTIFY, LBS_OWNERDRAWFIXED, MB_ICONWARNING, MB_OK, MSG, MessageBoxW, PostQuitMessage,
-    SPI_GETWORKAREA, SW_SHOWNORMAL, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow,
-    SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED,
-    WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DRAWITEM,
-    WM_ENABLE, WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SETFONT,
-    WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED,
-    WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    CW_USEDEFAULT, CreateWindowExW, DLGC_WANTARROWS, DefWindowProcW, ES_AUTOHSCROLL,
+    ES_AUTOVSCROLL, ES_MULTILINE, ES_NUMBER, ES_WANTRETURN, GetClientRect, GetDlgCtrlID,
+    GetDlgItem, GetParent, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, IDC_SIZEALL,
+    LB_ADDSTRING, LB_DELETESTRING, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_INSERTSTRING,
+    LB_RESETCONTENT, LB_SETCURSEL, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY,
+    LBS_OWNERDRAWFIXED, MB_ICONWARNING, MB_OK, MessageBoxW, SPI_GETWORKAREA, SW_SHOWNORMAL,
+    SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW,
+    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, SystemParametersInfoW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
+    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ENABLE, WM_ERASEBKGND, WM_GETDLGCODE,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE,
+    WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
+    WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    WS_VSCROLL,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 use windows_numerics::Vector2;
@@ -1111,28 +1111,14 @@ impl Dialog {
     /// [`EventLoop`](crate::events::EventLoop); with one, use [`Dialog::show`].
     pub fn run(&mut self, mut handler: impl FnMut(&mut Dialog, Event) -> Flow) -> Result<Outcome> {
         self.show();
-        let mut msg = MSG::default();
         loop {
             while let Some(event) = self.next_event() {
                 if handler(self, event) == Flow::Close {
                     return Ok(Outcome::Closed);
                 }
             }
-            unsafe {
-                match GetMessageW(&mut msg, None, 0, 0).0 {
-                    0 => {
-                        PostQuitMessage(msg.wParam.0 as i32);
-                        return Ok(Outcome::Quit);
-                    }
-                    -1 => {
-                        return Err(Error::last("GetMessageW"));
-                    }
-                    _ => {}
-                }
-                if !self.ui.dialog_message(&msg) {
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
+            if !self.ui.pump_wait()? {
+                return Ok(Outcome::Quit);
             }
         }
     }
