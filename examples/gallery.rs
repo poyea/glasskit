@@ -13,7 +13,7 @@ use glasskit::placement::Placement;
 use glasskit::popup::{ChoicePopup, Image, Prompt};
 
 /// The kinds of popup. "stack" shows two popups at once: the second goes above the first.
-const KINDS: &[&str] = &["plain", "countdown", "markup", "stack", "image"];
+const KINDS: &[&str] = &["plain", "countdown", "markup", "stack", "image", "input"];
 
 fn prompt(kind: &str) -> Option<Prompt> {
     Some(match kind {
@@ -21,6 +21,9 @@ fn prompt(kind: &str) -> Option<Prompt> {
         "countdown" => Prompt::new("Take a short break?", ["Yes", "Later"])
             .dismiss_label("Skip")
             .auto_dismiss(Some(Duration::from_secs(90))),
+        "input" => Prompt::new("How do you write 'remember' in Chinese?", [] as [&str; 0])
+            .input("Type the answer")
+            .dismiss_label("Skip"),
         "image" => {
             Prompt::new("Which shape is this?", ["Circle", "Square", "Ring"]).image(ring(160))
         }

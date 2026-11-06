@@ -6,32 +6,39 @@
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant, SystemTime};
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_ROUNDED_RECT,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_ROUNDED_RECT,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, ID2D1DeviceContext,
 };
-use windows::Win32::Graphics::DirectWrite::{DWRITE_MEASURING_MODE_NATURAL, IDWriteTextFormat};
+use windows::Win32::Graphics::DirectWrite::{
+    DWRITE_HIT_TEST_METRICS, DWRITE_MEASURING_MODE_NATURAL,
+};
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY,
+    VK_DELETE, VK_END, VK_HOME, VK_LEFT, VK_RIGHT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, HWND_TOPMOST, IDC_HAND, KillTimer, LoadCursorW, MA_NOACTIVATE,
+    DefWindowProcW, HWND_TOPMOST, IDC_HAND, KillTimer, LoadCursorW, MA_ACTIVATE, MA_NOACTIVATE,
     SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetTimer, SetWindowPos,
-    ShowWindow, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_SETCURSOR, WM_TIMER,
+    ShowWindow, WM_CHAR, WM_DESTROY, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_SETCURSOR, WM_SETFOCUS, WM_TIMER,
 };
 use windows_numerics::Vector2;
 
 use super::countdown::{self, Countdown};
 use super::glass::{self, Scene};
-use super::layout::Layout;
+use super::input::TextBox;
+use super::layout::{Fonts, Layout};
 use super::{Image, Mark, PopupStyle, Prompt, Reply, Response};
 use crate::error::{Call, Result};
 use crate::theme::Theme;
@@ -43,6 +50,13 @@ const FADE_OUT_EXTRA: Duration = Duration::from_millis(50);
 const TIMER_COUNTDOWN: usize = 1;
 const TIMER_FADE_OUT: usize = 2;
 const TIMER_FEEDBACK: usize = 3;
+const BACKSPACE: u16 = 0x08;
+const ENTER: u16 = 0x0D;
+/// Ctrl+V.
+const PASTE: u16 = 0x16;
+const ESCAPE: u16 = 0x1B;
+/// The clipboard text that a paste reads, at most, in UTF-16 units.
+const MAX_PASTE: usize = 4096;
 
 /// The window procedure can run again inside a call that it makes. For example,
 /// `ReleaseCapture` sends `WM_CAPTURECHANGED`. Thus the state is shared and changes only in
@@ -54,7 +68,7 @@ pub(super) struct WindowState {
     pub(super) layout: RefCell<Layout>,
     pub(super) scene: Scene,
     pub(super) theme: Theme,
-    pub(super) button_format: IDWriteTextFormat,
+    pub(super) fonts: Fonts,
     hover: Cell<Option<usize>>,
     pressed: Cell<Option<usize>>,
     pointer_inside: Cell<bool>,
@@ -62,13 +76,14 @@ pub(super) struct WindowState {
     countdown: RefCell<Option<Countdown>>,
     marks: Option<Vec<Vec<(usize, Mark)>>>,
     image: Option<Image>,
+    input: Option<RefCell<TextBox>>,
     selected: Cell<Option<usize>>,
     /// True from the start of the feedback or the fade-out. Then the popup ignores the mouse.
     closing: Cell<bool>,
     /// The response to give when the fade-out is complete.
-    pending: Cell<Option<Response>>,
+    pending: RefCell<Option<Response>>,
     decided_at: Cell<Option<SystemTime>>,
-    response: Cell<Option<Response>>,
+    response: RefCell<Option<Response>>,
 }
 
 impl WindowState {
@@ -78,7 +93,7 @@ impl WindowState {
         layout: Layout,
         scene: Scene,
         theme: Theme,
-        button_format: IDWriteTextFormat,
+        fonts: Fonts,
         request: &Prompt,
     ) -> Self {
         Self {
@@ -87,7 +102,7 @@ impl WindowState {
             layout: RefCell::new(layout),
             scene,
             theme,
-            button_format,
+            fonts,
             hover: Cell::new(None),
             pressed: Cell::new(None),
             pointer_inside: Cell::new(false),
@@ -95,17 +110,18 @@ impl WindowState {
             countdown: RefCell::new(request.auto_dismiss.map(Countdown::new)),
             marks: request.marks.clone(),
             image: request.image.clone(),
+            input: request.input.clone().map(|p| RefCell::new(TextBox::new(p))),
             selected: Cell::new(None),
             closing: Cell::new(false),
-            pending: Cell::new(None),
+            pending: RefCell::new(None),
             decided_at: Cell::new(None),
-            response: Cell::new(None),
+            response: RefCell::new(None),
         }
     }
 
     /// The reply, once the prompt has ended.
     pub(super) fn reply(&self) -> Option<Reply> {
-        let response = self.response.get()?;
+        let response = self.response.borrow().clone()?;
         let at = self.decided_at.get().unwrap_or_else(SystemTime::now);
         Some(Reply { response, at })
     }
@@ -134,8 +150,8 @@ impl WindowState {
     /// End the prompt with this response, and wake the event loop. A later response is
     /// ignored.
     fn finish(&self, response: Response) {
-        if self.response.get().is_none() {
-            self.response.set(Some(response));
+        if self.response.borrow().is_none() {
+            *self.response.borrow_mut() = Some(response);
             crate::ui::notify(Notice::Popup(self.id));
         }
     }
@@ -240,7 +256,7 @@ impl WindowState {
 
     fn fade_out(&self, hwnd: HWND, response: Response) {
         self.close_input(hwnd);
-        self.pending.set(Some(response));
+        *self.pending.borrow_mut() = Some(response.clone());
         unsafe {
             let started = match self.scene.fade(1.0, 0.0, self.style.fade) {
                 Ok(()) => {
@@ -258,6 +274,162 @@ impl WindowState {
                 self.finish(response);
             }
         }
+    }
+
+    /// Stop the countdown for good, and show the plain dismiss label.
+    fn stop_countdown(&self, hwnd: HWND) {
+        if self.countdown.replace(None).is_some() {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), TIMER_COUNTDOWN);
+            }
+            if let Some(b) = self.layout.borrow_mut().buttons.last_mut() {
+                b.label = self.dismiss.encode_utf16().collect();
+            }
+        }
+    }
+
+    /// Handle one `WM_CHAR` for the input box.
+    fn type_char(&self, hwnd: HWND, unit: u16) {
+        let Some(input) = &self.input else {
+            return;
+        };
+        let changed = match unit {
+            ENTER => {
+                let text = input.borrow().text().trim().to_string();
+                if !text.is_empty() {
+                    self.decide();
+                    self.close_input(hwnd);
+                    self.finish(Response::Text(text));
+                }
+                return;
+            }
+            ESCAPE => {
+                self.decide();
+                self.close_input(hwnd);
+                self.finish(Response::Dismissed);
+                return;
+            }
+            BACKSPACE => input.borrow_mut().backspace(),
+            PASTE => match clipboard_text(hwnd) {
+                Some(text) => input.borrow_mut().insert(&text),
+                None => false,
+            },
+            unit if unit < 0x20 || unit == 0x7F => false,
+            unit => input.borrow_mut().type_unit(unit),
+        };
+        if changed {
+            self.stop_countdown(hwnd);
+            self.redraw();
+        }
+    }
+
+    /// Handle a key that moves the caret or deletes. It gives false for other keys.
+    fn move_caret(&self, key: u16) -> bool {
+        let Some(input) = &self.input else {
+            return false;
+        };
+        let changed = {
+            let mut b = input.borrow_mut();
+            match VIRTUAL_KEY(key) {
+                VK_LEFT => b.left(),
+                VK_RIGHT => b.right(),
+                VK_HOME => b.home(),
+                VK_END => b.end(),
+                VK_DELETE => b.delete(),
+                _ => return false,
+            }
+        };
+        if changed {
+            self.redraw();
+        }
+        true
+    }
+
+    /// Draw the input box: its frame, the text or the placeholder, and the caret.
+    fn draw_input(
+        &self,
+        dc: &ID2D1DeviceContext,
+        input: &TextBox,
+        rect: D2D_RECT_F,
+        radius: f32,
+        padding: f32,
+    ) -> windows::core::Result<()> {
+        let t = &self.theme;
+        unsafe {
+            let shape = D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            dc.FillRoundedRectangle(&shape, &dc.CreateSolidColorBrush(&t.button, None)?);
+            let edge = if input.focused {
+                t.text
+            } else {
+                t.button_border
+            };
+            let outline = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: rect.left + 0.5,
+                    top: rect.top + 0.5,
+                    right: rect.right - 0.5,
+                    bottom: rect.bottom - 0.5,
+                },
+                radiusX: radius,
+                radiusY: radius,
+            };
+            dc.DrawRoundedRectangle(&outline, &dc.CreateSolidColorBrush(&edge, None)?, 1.0, None);
+
+            let empty = input.text().is_empty();
+            let shown = if empty {
+                input.placeholder.as_str()
+            } else {
+                input.text()
+            };
+            let wide: Vec<u16> = shown.encode_utf16().collect();
+            let width = rect.right - rect.left - 2.0 * padding;
+            let height = rect.bottom - rect.top;
+            let layout =
+                self.fonts
+                    .dwrite
+                    .CreateTextLayout(&wide, &self.fonts.input, width, height)?;
+            // Where the caret is, so the text can scroll left to keep it in the box.
+            let (mut x, mut y) = (0.0, 0.0);
+            let mut caret = DWRITE_HIT_TEST_METRICS::default();
+            let position = if empty { 0 } else { input.caret_utf16() };
+            layout.HitTestTextPosition(position, false, &mut x, &mut y, &mut caret)?;
+            let scroll = (x - width).max(0.0);
+            let origin = Vector2 {
+                X: rect.left + padding - scroll,
+                Y: rect.top,
+            };
+            let mut color = t.text;
+            if empty {
+                color.a *= 0.5;
+            }
+            dc.PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_ALIASED);
+            dc.DrawTextLayout(
+                origin,
+                &layout,
+                &dc.CreateSolidColorBrush(&color, None)?,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+            if input.focused {
+                let x = (origin.X + x).round() + 0.5;
+                let top = origin.Y + caret.top;
+                dc.DrawLine(
+                    Vector2 { X: x, Y: top },
+                    Vector2 {
+                        X: x,
+                        Y: top + caret.height,
+                    },
+                    &dc.CreateSolidColorBrush(&t.text, None)?,
+                    1.0,
+                    None,
+                );
+            }
+            dc.PopAxisAlignedClip();
+        }
+        Ok(())
     }
 
     fn hit(&self, lparam: LPARAM) -> Option<usize> {
@@ -296,6 +468,9 @@ impl WindowState {
             if let (Some(rect), Some(image)) = (l.image, &self.image) {
                 draw_image(dc, image, rect)?;
             }
+            if let (Some(rect), Some(input)) = (l.input, &self.input) {
+                self.draw_input(dc, &input.borrow(), rect, l.radius, l.input_padding)?;
+            }
 
             let border = dc.CreateSolidColorBrush(&t.button_border, None)?;
             for (i, b) in l.buttons.iter().enumerate() {
@@ -330,7 +505,7 @@ impl WindowState {
                 dc.DrawRoundedRectangle(&outline, &border, 1.0, None);
                 dc.DrawText(
                     &b.label,
-                    &self.button_format,
+                    &self.fonts.button,
                     &b.rect,
                     &text,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -344,6 +519,35 @@ impl WindowState {
     /// A failed redraw keeps the last frame. The next redraw tries again.
     fn redraw(&self) {
         let _ = self.draw();
+    }
+}
+
+/// The text on the clipboard, if there is text.
+fn clipboard_text(hwnd: HWND) -> Option<String> {
+    unsafe {
+        OpenClipboard(Some(hwnd)).ok()?;
+        let text = read_clipboard_text();
+        let _ = CloseClipboard();
+        text
+    }
+}
+
+/// Read the text of the clipboard. The clipboard must be open.
+unsafe fn read_clipboard_text() -> Option<String> {
+    unsafe {
+        let handle = GetClipboardData(u32::from(CF_UNICODETEXT.0)).ok()?;
+        let global = HGLOBAL(handle.0);
+        let start = GlobalLock(global) as *const u16;
+        if start.is_null() {
+            return None;
+        }
+        let mut len = 0;
+        while len < MAX_PASTE && *start.add(len) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(start, len));
+        let _ = GlobalUnlock(global);
+        Some(text)
     }
 }
 
@@ -397,7 +601,29 @@ pub(super) extern "system" fn wndproc(
         };
 
         match msg {
+            WM_MOUSEACTIVATE if state.input.is_some() && !state.closing.get() => {
+                LRESULT(MA_ACTIVATE as isize)
+            }
             WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+            WM_SETFOCUS | WM_KILLFOCUS => {
+                if let Some(input) = &state.input {
+                    input.borrow_mut().focused = msg == WM_SETFOCUS;
+                    state.redraw();
+                }
+                LRESULT(0)
+            }
+            // A posted WM_CHAR also counts, so a test can type without the focus.
+            WM_CHAR if state.input.is_some() && !state.closing.get() => {
+                state.type_char(hwnd, wparam.0 as u16);
+                LRESULT(0)
+            }
+            WM_KEYDOWN if state.input.is_some() && !state.closing.get() => {
+                if state.move_caret(wparam.0 as u16) {
+                    LRESULT(0)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
             WM_TIMER => {
                 match wparam.0 {
                     TIMER_COUNTDOWN => state.tick(hwnd),
@@ -408,7 +634,8 @@ pub(super) extern "system" fn wndproc(
                         }
                     }
                     TIMER_FADE_OUT => {
-                        if let Some(response) = state.pending.get() {
+                        let pending = state.pending.borrow_mut().take();
+                        if let Some(response) = pending {
                             state.finish(response);
                         }
                     }
@@ -466,7 +693,7 @@ pub(super) extern "system" fn wndproc(
                 match pressed {
                     Some(i) if hit == Some(i) => {
                         state.decide();
-                        let response = state.layout.borrow().buttons[i].response;
+                        let response = state.layout.borrow().buttons[i].response.clone();
                         match response {
                             Response::Choice(choice) if state.marks.is_some() => {
                                 state.show_feedback(hwnd, choice);

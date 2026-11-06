@@ -26,6 +26,7 @@ pub struct Prompt {
     pub(super) auto_dismiss: Option<Duration>,
     pub(super) markup: bool,
     pub(super) image: Option<Image>,
+    pub(super) input: Option<String>,
 }
 
 impl Prompt {
@@ -44,6 +45,7 @@ impl Prompt {
             auto_dismiss: None,
             markup: false,
             image: None,
+            input: None,
         }
     }
 
@@ -99,6 +101,23 @@ impl Prompt {
     #[must_use]
     pub fn image(mut self, image: Image) -> Self {
         self.image = Some(image);
+        self
+    }
+
+    /// Show a box for a short typed answer below the text, with `placeholder` in grey while
+    /// it is empty. The popup does not take the keyboard when it shows. When the user clicks
+    /// it, it takes the keyboard. Then Enter ends the prompt with
+    /// [`Response::Text`](super::Response::Text), and Esc dismisses it. The countdown of
+    /// [`Prompt::auto_dismiss`] stops when the user starts to type.
+    ///
+    /// ```
+    /// # use glasskit::popup::Prompt;
+    /// let prompt = Prompt::new("How do you say 'remember' in Cantonese?", [] as [&str; 0])
+    ///     .input("Type the answer");
+    /// ```
+    #[must_use]
+    pub fn input(mut self, placeholder: impl Into<String>) -> Self {
+        self.input = Some(placeholder.into());
         self
     }
 

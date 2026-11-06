@@ -113,6 +113,10 @@ impl Graphics {
         }
     }
 
+    pub fn dwrite(&self) -> IDWriteFactory {
+        self.dwrite.clone()
+    }
+
     pub fn text_layout(
         &self,
         text: &str,

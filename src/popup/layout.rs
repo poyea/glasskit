@@ -5,13 +5,14 @@
 
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
 
 use super::glass::{self, Graphics};
 use super::markup;
 use super::{PopupStyle, Prompt, Response};
-use crate::error::Result;
+use crate::error::{Call, Result};
 
 const PADDING: f32 = 18.0;
 const TEXT_GAP: f32 = 14.0;
@@ -24,10 +25,15 @@ const DISMISS_MIN_WIDTH: f32 = 72.0;
 const DISMISS_TEXT_PADDING: f32 = 12.0;
 const DISMISS_HEIGHT: f32 = 28.0;
 const IMAGE_MAX_HEIGHT: f32 = 240.0;
+const INPUT_HEIGHT: f32 = 34.0;
+const INPUT_TEXT_PADDING: f32 = 10.0;
 
+/// The text formats, and the factory for text that changes while the popup shows.
 pub(super) struct Fonts {
     pub(super) prompt: IDWriteTextFormat,
     pub(super) button: IDWriteTextFormat,
+    pub(super) input: IDWriteTextFormat,
+    pub(super) dwrite: IDWriteFactory,
 }
 
 impl Fonts {
@@ -43,6 +49,8 @@ impl Fonts {
                 DWRITE_FONT_WEIGHT_NORMAL,
                 true,
             )?,
+            input: input_format(gfx, style.button_text_size * scale)?,
+            dwrite: gfx.dwrite(),
         })
     }
 }
@@ -62,6 +70,10 @@ pub(super) struct Layout {
     pub(super) prompt: IDWriteTextLayout,
     /// Where the image of the prompt shows, if it has one.
     pub(super) image: Option<D2D_RECT_F>,
+    /// Where the input box shows, if the prompt has one.
+    pub(super) input: Option<D2D_RECT_F>,
+    /// The space between the edge of the input box and its text.
+    pub(super) input_padding: f32,
     /// The choices in order, then the dismiss button.
     pub(super) buttons: Vec<Button>,
 }
@@ -73,6 +85,7 @@ pub(super) struct Content {
     pub(super) choices: Vec<String>,
     pub(super) dismiss: String,
     pub(super) image: Option<(u32, u32)>,
+    pub(super) input: bool,
 }
 
 impl Content {
@@ -88,6 +101,7 @@ impl Content {
             choices: prompt.choices.clone(),
             dismiss,
             image: prompt.image.as_ref().map(|i| (i.width, i.height)),
+            input: prompt.input.is_some(),
         }
     }
 }
@@ -117,6 +131,11 @@ pub(super) fn build(
         let (w, h) = fit(size, scale, inner, s(IMAGE_MAX_HEIGHT));
         let rect = glass::rect(pad + ((inner - w) / 2.0).round(), y, w, h);
         y += h + s(TEXT_GAP);
+        rect
+    });
+    let input = content.input.then(|| {
+        let rect = glass::rect(pad, y, inner, s(INPUT_HEIGHT));
+        y += s(INPUT_HEIGHT) + s(TEXT_GAP);
         rect
     });
 
@@ -152,8 +171,24 @@ pub(super) fn build(
         window_radius: s(WINDOW_RADIUS),
         prompt: prompt_layout,
         image,
+        input,
+        input_padding: s(INPUT_TEXT_PADDING),
         buttons,
     })
+}
+
+/// One line of text, at the left and in the middle of its height.
+fn input_format(gfx: &Graphics, size: f32) -> Result<IDWriteTextFormat> {
+    let format = gfx.text_format(size, DWRITE_FONT_WEIGHT_NORMAL, false)?;
+    unsafe {
+        format
+            .SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)
+            .call("SetParagraphAlignment")?;
+        format
+            .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)
+            .call("SetWordWrapping")?;
+    }
+    Ok(format)
 }
 
 /// The size of an image of `(width, height)` pixels at this scale, smaller if needed to fit

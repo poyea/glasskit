@@ -138,6 +138,27 @@ foreach ($kind in $kinds) {
     }
 }
 
+Step 'typed answer' {
+    # Type into the input box, as a keyboard does, and check the reply that the app prints.
+    $log = Join-Path $Out 'typed.txt'
+    $p = Start-Process $gallery -ArgumentList 'input' -PassThru -RedirectStandardOutput $log
+    try {
+        $hwnd = Find-Window $p 'GlasskitChoicePopup'
+        Start-Sleep -Milliseconds 500
+        foreach ($c in [char[]] 'jik') {
+            [GlassUi]::PostMessageW($hwnd, 0x0102, [IntPtr][int] $c, [IntPtr]::Zero) | Out-Null
+        }
+        Start-Sleep -Milliseconds 300
+        Save-Picture $hwnd 'popup-input-typed' -FromScreen
+        [GlassUi]::PostMessageW($hwnd, 0x0102, [IntPtr] 0x0D, [IntPtr]::Zero) | Out-Null
+        if (-not $p.WaitForExit(5000)) { throw 'The popup did not end on Enter.' }
+        $reply = (Get-Content $log -Raw).Trim()
+        if ($reply -ne 'Text("jik")') { throw "The reply was '$reply', not Text(`"jik`")." }
+    } finally {
+        Stop-App $p
+    }
+}
+
 Step 'dialog' {
     $p = Start-Process (Join-Path $bin 'dialog.exe') -PassThru
     try {

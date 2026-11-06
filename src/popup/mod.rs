@@ -9,6 +9,7 @@
 mod countdown;
 mod glass;
 mod image;
+mod input;
 mod layout;
 mod markup;
 mod prompt;
@@ -48,10 +49,14 @@ const CLASS_NAME: PCWSTR = w!("GlasskitChoicePopup");
 const STACK_GAP: f32 = 8.0;
 
 /// How a popup ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Response {
     /// The user clicked the choice at this index.
     Choice(usize),
+    /// The user typed this text in the input box and pressed Enter. See [`Prompt::input`].
+    /// The text has no space at the start or the end, and it is not empty.
+    Text(String),
     /// The user clicked the dismiss button.
     Dismissed,
     /// The auto-dismiss countdown came to zero, and the popup faded out.
@@ -61,7 +66,7 @@ pub enum Response {
 }
 
 /// The answer of [`ChoicePopup::ask`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
     /// How the popup ended.
     pub response: Response,
@@ -172,15 +177,7 @@ impl ChoicePopup {
                 return Err(err);
             }
         };
-        let state = WindowState::new(
-            self.id.0,
-            self.style,
-            layout,
-            scene,
-            theme,
-            fonts.button,
-            request,
-        );
+        let state = WindowState::new(self.id.0, self.style, layout, scene, theme, fonts, request);
         let handle = Window::attach(hwnd, Rc::new(state));
         handle.state().open(hwnd)?;
         self.active = Some(Active {
@@ -283,8 +280,13 @@ fn create_window(
             work.bottom,
         );
         let (x, y) = (rect.x, rect.y);
+        // A popup with an input box must take the keyboard when the user clicks it.
+        let mut ex_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP;
+        if layout.input.is_none() {
+            ex_style |= WS_EX_NOACTIVATE;
+        }
         let hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
+            ex_style,
             CLASS_NAME,
             CLASS_NAME,
             WS_POPUP,
