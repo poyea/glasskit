@@ -131,7 +131,7 @@ impl ChoicePopup {
         let gfx = Graphics::new()?;
         let fonts = layout::Fonts::new(&gfx, scale, &self.style)?;
         let dismiss_label = match request.auto_dismiss {
-            Some(after) => label(request.dismiss, whole_seconds(after)),
+            Some(after) => label(&request.dismiss, whole_seconds(after)),
             None => request.dismiss.to_string(),
         };
         let layout = layout::build(
@@ -139,7 +139,7 @@ impl ChoicePopup {
             self.style.width,
             &gfx,
             &fonts,
-            request.text,
+            &request.text,
             &request.choices,
             &dismiss_label,
         )?;

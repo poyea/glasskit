@@ -15,25 +15,28 @@ pub enum Mark {
 /// What a [`ChoicePopup`](super::ChoicePopup) asks: a text, the choices, and how the popup
 /// ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Prompt<'a> {
-    pub(super) text: &'a str,
-    pub(super) choices: Vec<&'a str>,
+pub struct Prompt {
+    pub(super) text: String,
+    pub(super) choices: Vec<String>,
     /// For each choice that the user can click: the buttons to mark after that click.
     pub(super) marks: Option<Vec<Vec<(usize, Mark)>>>,
-    pub(super) dismiss: &'a str,
+    pub(super) dismiss: String,
     pub(super) auto_dismiss: Option<Duration>,
 }
 
-impl<'a> Prompt<'a> {
+impl Prompt {
     /// A prompt with this text and these choices, one button for each. The dismiss button
     /// says "Dismiss". A click on it closes the popup at once. The popup stays until the user
     /// clicks.
-    pub fn new(text: &'a str, choices: impl IntoIterator<Item = &'a str>) -> Self {
+    pub fn new(
+        text: impl Into<String>,
+        choices: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         Self {
-            text,
-            choices: choices.into_iter().collect(),
+            text: text.into(),
+            choices: choices.into_iter().map(Into::into).collect(),
             marks: None,
-            dismiss: "Dismiss",
+            dismiss: "Dismiss".into(),
             auto_dismiss: None,
         }
     }
@@ -72,8 +75,8 @@ impl<'a> Prompt<'a> {
 
     /// The text of the dismiss button.
     #[must_use]
-    pub fn dismiss_label(mut self, label: &'a str) -> Self {
-        self.dismiss = label;
+    pub fn dismiss_label(mut self, label: impl Into<String>) -> Self {
+        self.dismiss = label.into();
         self
     }
 
@@ -140,6 +143,14 @@ mod tests {
         );
         assert_eq!(p.dismiss, "Skip");
         assert_eq!(p.auto_dismiss, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn prompt_takes_owned_strings() {
+        let choices = vec![String::from("a"), String::from("b")];
+        let p = Prompt::new(String::from("Q?"), choices).dismiss_label(String::from("Skip"));
+        assert_eq!((p.text.as_str(), p.dismiss.as_str()), ("Q?", "Skip"));
+        assert_eq!(p.choices, ["a", "b"]);
     }
 
     #[test]
