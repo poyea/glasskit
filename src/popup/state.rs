@@ -36,7 +36,6 @@ use crate::window::state_of;
 
 /// The window closes this long after the fade-out, so the last frame shows.
 const FADE_OUT_EXTRA: Duration = Duration::from_millis(50);
-const COUNTDOWN_TICK: Duration = Duration::from_millis(200);
 const TIMER_COUNTDOWN: usize = 1;
 const TIMER_FADE_OUT: usize = 2;
 const TIMER_FEEDBACK: usize = 3;
@@ -122,17 +121,7 @@ impl WindowState {
             .call("SetWindowPos")?;
         }
         self.scene.fade(0.0, 1.0, self.style.fade)?;
-        if let Some(c) = self.countdown.borrow_mut().as_mut() {
-            c.last_tick = Instant::now();
-            unsafe {
-                SetTimer(
-                    Some(hwnd),
-                    TIMER_COUNTDOWN,
-                    COUNTDOWN_TICK.as_millis() as u32,
-                    None,
-                );
-            }
-        }
+        self.resume_countdown(hwnd);
         Ok(())
     }
 
@@ -145,40 +134,65 @@ impl WindowState {
         }
     }
 
+    /// Called when the timer of the countdown fires. It updates the label, if the whole
+    /// seconds changed, and sets the next timer.
     fn tick(&self, hwnd: HWND) {
-        let seconds = {
+        let (left, label, running) = {
             let mut countdown = self.countdown.borrow_mut();
             let Some(c) = countdown.as_mut() else {
                 return;
             };
-            let now = Instant::now();
-            if !self.pointer_inside.get() {
-                c.left = c.left.saturating_sub(now - c.last_tick);
-            }
-            c.last_tick = now;
-            if c.left.is_zero() {
-                None
-            } else {
-                let seconds = countdown::whole_seconds(c.left);
-                if seconds == c.shown {
-                    return;
-                }
+            let left = c.remaining(Instant::now());
+            let seconds = countdown::whole_seconds(left);
+            let mut label = None;
+            if seconds != c.shown {
                 c.shown = seconds;
-                Some(seconds)
+                label = Some(countdown::label(&self.dismiss, seconds));
             }
+            (left, label, c.is_running())
         };
-        match seconds {
-            None => {
-                self.decide();
-                self.fade_out(hwnd, Response::TimedOut);
+        if left.is_zero() {
+            self.decide();
+            self.fade_out(hwnd, Response::TimedOut);
+            return;
+        }
+        if let Some(label) = label {
+            if let Some(b) = self.layout.borrow_mut().buttons.last_mut() {
+                b.label = label.encode_utf16().collect();
             }
-            Some(seconds) => {
-                let label = countdown::label(&self.dismiss, seconds);
-                if let Some(b) = self.layout.borrow_mut().buttons.last_mut() {
-                    b.label = label.encode_utf16().collect();
-                }
-                self.redraw();
-            }
+            self.redraw();
+        }
+        if running {
+            self.arm_countdown(hwnd, left);
+        }
+    }
+
+    /// Let the countdown run from its time left, and wake up at its next whole second.
+    fn resume_countdown(&self, hwnd: HWND) {
+        let now = Instant::now();
+        let left = self.countdown.borrow_mut().as_mut().map(|c| {
+            c.resume(now);
+            c.remaining(now)
+        });
+        if let Some(left) = left {
+            self.arm_countdown(hwnd, left);
+        }
+    }
+
+    /// Stop the countdown while the pointer is on the popup. It keeps the time left.
+    fn pause_countdown(&self, hwnd: HWND) {
+        if let Some(c) = self.countdown.borrow_mut().as_mut() {
+            c.pause(Instant::now());
+        }
+        unsafe {
+            let _ = KillTimer(Some(hwnd), TIMER_COUNTDOWN);
+        }
+    }
+
+    fn arm_countdown(&self, hwnd: HWND, left: Duration) {
+        let delay = countdown::until_next_second(left);
+        unsafe {
+            SetTimer(Some(hwnd), TIMER_COUNTDOWN, delay.as_millis() as u32, None);
         }
     }
 
@@ -364,7 +378,10 @@ pub(super) extern "system" fn wndproc(
                         hwndTrack: hwnd,
                         dwHoverTime: 0,
                     };
-                    state.pointer_inside.set(TrackMouseEvent(&mut tme).is_ok());
+                    if TrackMouseEvent(&mut tme).is_ok() {
+                        state.pointer_inside.set(true);
+                        state.pause_countdown(hwnd);
+                    }
                 }
                 let hit = state.hit(lparam);
                 if hit != state.hover.get() {
@@ -375,6 +392,7 @@ pub(super) extern "system" fn wndproc(
             }
             WM_MOUSELEAVE => {
                 state.pointer_inside.set(false);
+                state.resume_countdown(hwnd);
                 state.hover.set(None);
                 state.redraw();
                 LRESULT(0)
