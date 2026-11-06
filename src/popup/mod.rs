@@ -9,6 +9,7 @@
 mod countdown;
 mod glass;
 mod layout;
+mod markup;
 mod prompt;
 mod state;
 
@@ -134,15 +135,8 @@ impl ChoicePopup {
             Some(after) => label(&request.dismiss, whole_seconds(after)),
             None => request.dismiss.to_string(),
         };
-        let layout = layout::build(
-            scale,
-            self.style.width,
-            &gfx,
-            &fonts,
-            &request.text,
-            &request.choices,
-            &dismiss_label,
-        )?;
+        let content = layout::Content::of(request, dismiss_label);
+        let layout = layout::build(scale, self.style.width, &gfx, &fonts, &content)?;
         let theme = Theme::current();
         let hwnd = create_window(self.ui.hinstance(), &layout, self.placement, scale, &theme)?;
         let scene = match Scene::new(

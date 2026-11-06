@@ -11,7 +11,7 @@ use glasskit::layout::{Column, Size};
 
 fn main() -> glasskit::Result<()> {
     let ui = Ui::new()?;
-    let (width, height) = (420, 220);
+    let (width, height) = (420, 186);
     let mut d = Dialog::new(&ui, "Profile", width, height)?;
     let mut rows = Column::new(Bounds::new(0, 0, width, height).inset(16), 10);
 

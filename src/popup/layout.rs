@@ -9,7 +9,8 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 
 use super::glass::{self, Graphics};
-use super::{PopupStyle, Response};
+use super::markup;
+use super::{PopupStyle, Prompt, Response};
 use crate::error::Result;
 
 const PADDING: f32 = 18.0;
@@ -62,26 +63,55 @@ pub(super) struct Layout {
     pub(super) buttons: Vec<Button>,
 }
 
-pub(super) fn build<S: AsRef<str>>(
+/// What a popup shows, ready for layout.
+pub(super) struct Content {
+    pub(super) text: String,
+    pub(super) spans: Vec<markup::Span>,
+    pub(super) choices: Vec<String>,
+    pub(super) dismiss: String,
+}
+
+impl Content {
+    pub(super) fn of(prompt: &Prompt, dismiss: String) -> Self {
+        let (text, spans) = if prompt.markup {
+            markup::parse(&prompt.text)
+        } else {
+            (prompt.text.clone(), Vec::new())
+        };
+        Self {
+            text,
+            spans,
+            choices: prompt.choices.clone(),
+            dismiss,
+        }
+    }
+}
+
+pub(super) fn build(
     scale: f32,
     width: f32,
     gfx: &Graphics,
     fonts: &Fonts,
-    prompt: &str,
-    choices: &[S],
-    dismiss: &str,
+    content: &Content,
 ) -> Result<Layout> {
+    let (prompt, spans, choices, dismiss) = (
+        content.text.as_str(),
+        content.spans.as_slice(),
+        content.choices.as_slice(),
+        content.dismiss.as_str(),
+    );
     let s = |v: f32| (v * scale).round();
     let width = s(width);
     let pad = s(PADDING);
     let inner = width - 2.0 * pad;
 
     let prompt_layout = gfx.text_layout(prompt, &fonts.prompt, inner)?;
+    markup::apply(&prompt_layout, spans)?;
     let mut y = pad + glass::layout_height(&prompt_layout)?.ceil() + s(TEXT_GAP);
 
     let mut buttons = Vec::with_capacity(choices.len() + 1);
     for (i, choice) in choices.iter().enumerate() {
-        let choice = choice.as_ref();
+        let choice = choice.as_str();
         let text_w = inner - 2.0 * s(BUTTON_TEXT_PADDING);
         let label = gfx.text_layout(choice, &fonts.button, text_w)?;
         let h = (glass::layout_height(&label)?.ceil() + 2.0 * s(BUTTON_TEXT_PADDING))

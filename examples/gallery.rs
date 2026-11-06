@@ -12,7 +12,7 @@ use glasskit::Ui;
 use glasskit::placement::Placement;
 use glasskit::popup::{ChoicePopup, Prompt};
 
-const KINDS: &[&str] = &["plain", "countdown"];
+const KINDS: &[&str] = &["plain", "countdown", "markup"];
 
 fn prompt(kind: &str) -> Option<Prompt> {
     Some(match kind {
@@ -20,6 +20,11 @@ fn prompt(kind: &str) -> Option<Prompt> {
         "countdown" => Prompt::new("Take a short break?", ["Yes", "Later"])
             .dismiss_label("Skip")
             .auto_dismiss(Some(Duration::from_secs(90))),
+        "markup" => Prompt::new(
+            "What does **`git stash`** do with your *uncommitted* changes?",
+            ["Saves them aside", "Deletes them", "Commits them"],
+        )
+        .markup(),
         _ => return None,
     })
 }

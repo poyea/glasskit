@@ -22,6 +22,7 @@ pub struct Prompt {
     pub(super) marks: Option<Vec<Vec<(usize, Mark)>>>,
     pub(super) dismiss: String,
     pub(super) auto_dismiss: Option<Duration>,
+    pub(super) markup: bool,
 }
 
 impl Prompt {
@@ -38,6 +39,7 @@ impl Prompt {
             marks: None,
             dismiss: "Dismiss".into(),
             auto_dismiss: None,
+            markup: false,
         }
     }
 
@@ -70,6 +72,21 @@ impl Prompt {
                 })
                 .collect(),
         );
+        self
+    }
+
+    /// Read a small markup in the text: `**bold**`, `*italic*`, and `` `code` ``. A
+    /// backslash shows the next character as it is, for example `\*`. A marker without its
+    /// end shows as it is. The choices stay plain.
+    ///
+    /// ```
+    /// # use glasskit::popup::Prompt;
+    /// let prompt = Prompt::new("What does `git stash` do?", ["Saves changes", "Deletes them"])
+    ///     .markup();
+    /// ```
+    #[must_use]
+    pub fn markup(mut self) -> Self {
+        self.markup = true;
         self
     }
 
