@@ -96,34 +96,70 @@ pub struct Reply {
     pub at: SystemTime,
 }
 
+/// How a choice button shows after a click. See [`Prompt::marks`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// The button becomes green, for example the correct answer.
+    Good,
+    /// The button becomes red, for example a wrong answer.
+    Bad,
+}
+
 /// What a [`ChoicePopup`] asks: a text, the choices, and how the popup ends.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prompt<'a> {
     text: &'a str,
     choices: Vec<&'a str>,
-    correct: Option<usize>,
+    /// For each choice that the user can click: the buttons to mark after that click.
+    marks: Option<Vec<Vec<(usize, Mark)>>>,
     dismiss: &'a str,
     auto_dismiss: Option<Duration>,
 }
 
 impl<'a> Prompt<'a> {
     /// A prompt with this text and these choices, one button for each. The dismiss button
-    /// says "Dismiss", there is no correct choice, and the popup stays until the user clicks.
+    /// says "Dismiss", a click closes the popup at once, and the popup stays until the user
+    /// clicks.
     pub fn new(text: &'a str, choices: impl IntoIterator<Item = &'a str>) -> Self {
         Self {
             text,
             choices: choices.into_iter().collect(),
-            correct: None,
+            marks: None,
             dismiss: "Dismiss",
             auto_dismiss: None,
         }
     }
 
-    /// Show the result of a click: the choice at `index` becomes green, and a wrong selected
-    /// choice becomes red. Then the popup fades out. An index out of range is ignored.
+    /// Show a result after a click on a choice. `marks` gets the index of the clicked choice
+    /// and gives the buttons to mark, as pairs of a choice index and a [`Mark`]. The popup
+    /// shows the marks for a moment, then fades out. Indexes out
+    /// of range are ignored.
+    ///
+    /// For a quiz with the correct answer at index 1:
+    ///
+    /// ```
+    /// # use glasskit::popup::{Mark, Prompt};
+    /// let prompt = Prompt::new("2 + 2?", ["3", "4"]).marks(|clicked| {
+    ///     let mut marks = vec![(1, Mark::Good)];
+    ///     if clicked != 1 {
+    ///         marks.push((clicked, Mark::Bad));
+    ///     }
+    ///     marks
+    /// });
+    /// ```
     #[must_use]
-    pub fn correct(mut self, index: usize) -> Self {
-        self.correct = Some(index);
+    pub fn marks(mut self, marks: impl Fn(usize) -> Vec<(usize, Mark)>) -> Self {
+        let count = self.choices.len();
+        self.marks = Some(
+            (0..count)
+                .map(|clicked| {
+                    marks(clicked)
+                        .into_iter()
+                        .filter(|&(index, _)| index < count)
+                        .collect()
+                })
+                .collect(),
+        );
         self
     }
 
@@ -186,11 +222,10 @@ impl ChoicePopup {
 
     /// Show the prompt and wait until it ends: the user clicks a choice or the dismiss button,
     /// the countdown ends, or the thread gets `WM_QUIT`. A click on the dismiss button, or on a
-    /// choice of a prompt without a correct choice, closes the popup immediately.
+    /// choice of a prompt without marks, closes the popup immediately.
     pub fn ask(&mut self, request: &Prompt) -> Result<Reply> {
         let prompt = request.text;
         let choices: &[&str] = &request.choices;
-        let correct = request.correct;
         let dismiss = request.dismiss;
         let auto_dismiss = request.auto_dismiss;
         let scale = primary_monitor_scale();
@@ -278,7 +313,7 @@ impl ChoicePopup {
                 pointer_inside: Cell::new(false),
                 dismiss: dismiss.to_string(),
                 countdown: RefCell::new(countdown),
-                correct: correct.filter(|&c| c < choices.len()),
+                marks: request.marks.clone(),
                 selected: Cell::new(None),
                 closing: Cell::new(false),
                 pending: Cell::new(None),
@@ -457,7 +492,7 @@ struct WindowState {
     pointer_inside: Cell<bool>,
     dismiss: String,
     countdown: RefCell<Option<Countdown>>,
-    correct: Option<usize>,
+    marks: Option<Vec<Vec<(usize, Mark)>>>,
     selected: Cell<Option<usize>>,
     /// True from the start of the feedback or the fade-out. Then the popup ignores the mouse.
     closing: Cell<bool>,
@@ -575,7 +610,10 @@ impl WindowState {
         let t = &self.theme;
         let l = &*self.layout.borrow();
         let (hover, pressed) = (self.hover.get(), self.pressed.get());
-        let result = self.selected.get().zip(self.correct);
+        let shown: &[(usize, Mark)] = match (self.selected.get(), &self.marks) {
+            (Some(clicked), Some(marks)) => &marks[clicked],
+            _ => &[],
+        };
         self.scene.draw(|dc: &ID2D1DeviceContext| unsafe {
             dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let frame = D2D1_ROUNDED_RECT {
@@ -596,9 +634,13 @@ impl WindowState {
 
             let border = dc.CreateSolidColorBrush(&t.button_border, None)?;
             for (i, b) in l.buttons.iter().enumerate() {
-                let fill = match result {
-                    Some((_, correct)) if i == correct => t.correct,
-                    Some((selected, _)) if i == selected => t.wrong,
+                let mark = shown
+                    .iter()
+                    .find(|&&(index, _)| index == i)
+                    .map(|&(_, m)| m);
+                let fill = match mark {
+                    Some(Mark::Good) => t.good,
+                    Some(Mark::Bad) => t.bad,
                     _ if pressed == Some(i) && hover == Some(i) => t.button_pressed,
                     _ if hover == Some(i) => t.button_hover,
                     _ => t.button,
@@ -712,7 +754,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         state.decide();
                         let response = state.layout.borrow().buttons[i].response;
                         match response {
-                            Response::Choice(choice) if state.correct.is_some() => {
+                            Response::Choice(choice) if state.marks.is_some() => {
                                 state.show_feedback(hwnd, choice);
                             }
                             _ => state.response.set(Some(response)),
@@ -752,7 +794,7 @@ mod tests {
     fn prompt_has_quiet_defaults() {
         let p = Prompt::new("Q?", ["a", "b"]);
         assert_eq!(p.choices, ["a", "b"]);
-        assert_eq!(p.correct, None);
+        assert_eq!(p.marks, None);
         assert_eq!(p.dismiss, "Dismiss");
         assert_eq!(p.auto_dismiss, None);
     }
@@ -760,11 +802,23 @@ mod tests {
     #[test]
     fn prompt_builders_set_each_part() {
         let p = Prompt::new("Q?", ["a", "b"])
-            .correct(1)
+            .marks(|clicked| vec![(clicked, Mark::Good)])
             .dismiss_label("Skip")
             .auto_dismiss(Some(Duration::from_secs(30)));
-        assert_eq!(p.correct, Some(1));
+        assert_eq!(
+            p.marks,
+            Some(vec![vec![(0, Mark::Good)], vec![(1, Mark::Good)]])
+        );
         assert_eq!(p.dismiss, "Skip");
         assert_eq!(p.auto_dismiss, Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn marks_out_of_range_are_dropped() {
+        let p = Prompt::new("Q?", ["a", "b"]).marks(|_| vec![(0, Mark::Good), (5, Mark::Bad)]);
+        assert_eq!(
+            p.marks,
+            Some(vec![vec![(0, Mark::Good)], vec![(0, Mark::Good)]])
+        );
     }
 }

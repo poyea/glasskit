@@ -34,7 +34,7 @@
 //!
 //! use glasskit::Ui;
 //! use glasskit::placement::Placement;
-//! use glasskit::popup::{ChoicePopup, Prompt, Response};
+//! use glasskit::popup::{ChoicePopup, Mark, Prompt, Response};
 //! use glasskit::tray::{Icon, MenuItem, Tray, Wake};
 //!
 //! #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,7 +60,7 @@
 //!             Wake::SessionUnlocked => {}
 //!             Wake::Deadline | Wake::Command(Command::AskNow) => {
 //!                 let prompt = Prompt::new("What is 2 + 2?", ["3", "4", "5"])
-//!                     .correct(1)
+//!                     .marks(|clicked| answer_marks(clicked, 1))
 //!                     .auto_dismiss(Some(Duration::from_secs(30)));
 //!                 if popup.ask(&prompt)?.response == Response::Quit {
 //!                     return Ok(());
@@ -68,6 +68,15 @@
 //!             }
 //!         }
 //!     }
+//! }
+//!
+//! /// Mark the correct answer good and a wrong click bad.
+//! fn answer_marks(clicked: usize, correct: usize) -> Vec<(usize, Mark)> {
+//!     let mut marks = vec![(correct, Mark::Good)];
+//!     if clicked != correct {
+//!         marks.push((clicked, Mark::Bad));
+//!     }
+//!     marks
 //! }
 //! ```
 //!
