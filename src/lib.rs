@@ -11,6 +11,7 @@
 //! - [`popup`]: a frosted-glass popup with a question and choice buttons. It fades in without
 //!   taking the keyboard focus, can show whether a choice was correct, and can dismiss itself.
 //! - [`dialog`]: a small modal window made of standard controls, in the same colors.
+//! - [`layout`]: rows and columns that place the controls of a dialog.
 //! - [`placement`]: where a window shows, as fractions of the free space of the screen.
 //! - [`autostart`], [`presence`], [`process`], [`single_instance`], and [`show_error`]: small
 //!   helpers that tray apps often need.
@@ -90,6 +91,7 @@ compile_error!("glasskit works only on Windows: it uses the Win32 and Windows Ru
 pub mod autostart;
 pub mod dialog;
 pub mod error;
+pub mod layout;
 pub mod placement;
 pub mod popup;
 pub mod presence;
