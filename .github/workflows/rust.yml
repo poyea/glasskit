@@ -28,3 +28,34 @@ jobs:
         run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: Minimum Rust version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+      - name: Check
+        run: cargo check --all-targets
+
+  desktop:
+    name: Pictures, idle CPU, and size
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the examples
+        run: cargo build --release --examples
+      - name: Desktop checks
+        shell: pwsh
+        run: ./tests/ui/ci.ps1 -Out ui-screenshots
+      - name: Upload the pictures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: ui-screenshots
+          retention-days: 14
+          if-no-files-found: ignore

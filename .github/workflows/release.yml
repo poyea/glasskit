@@ -26,6 +26,12 @@ jobs:
           fi
       - name: Test
         run: cargo test --release --verbose
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      # The version must say a break when the API breaks, against the last version on crates.io.
+      - name: Semver
+        run: cargo semver-checks
 
   crates:
     name: Upload to crates.io
