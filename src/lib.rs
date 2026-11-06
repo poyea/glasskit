@@ -112,7 +112,7 @@ mod theme;
 pub mod tray;
 mod ui;
 
-/// Compiles the example of the README as a doc test.
+/// Runs the README example as a doc test.
 #[cfg(doctest)]
 #[doc = include_str!("../README.md")]
 struct ReadmeExample;
@@ -132,8 +132,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::core::HSTRING;
 
-/// Register a window class. A class stays registered until the process ends, so a second
-/// registration of the same class is not an error.
+/// Register a window class. Windows keeps a class until the process ends. A second
+/// registration is not an error.
 pub(crate) fn register_class(class: &WNDCLASSEXW) -> Result<()> {
     unsafe {
         if RegisterClassExW(class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
@@ -143,8 +143,8 @@ pub(crate) fn register_class(class: &WNDCLASSEXW) -> Result<()> {
     Ok(())
 }
 
-/// The system DPI stays at its sign-in value. Read the DPI of the monitor each time a window
-/// opens, so a change of the display scale applies to the next window.
+/// The DPI of the primary monitor, read now. The system DPI does not change after sign-in,
+/// so it is only the fallback.
 pub(crate) fn primary_monitor_dpi() -> u32 {
     unsafe {
         let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);

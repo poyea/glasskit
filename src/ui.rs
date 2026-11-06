@@ -74,7 +74,7 @@ impl Ui {
             return Ok(Self { inner });
         }
         unsafe {
-            // Both fail harmlessly if the manifest or the app made the same choice before.
+            // Both calls fail if the manifest or the app already chose the same value. That is harmless.
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             let _ = RoInitialize(RO_INIT_SINGLETHREADED);
             let _ = InitCommonControlsEx(&INITCOMMONCONTROLSEX {
@@ -104,7 +104,6 @@ impl Ui {
         self.inner.hinstance
     }
 
-    /// A number that no other popup or dialog of this thread has.
     pub(crate) fn new_id(&self) -> u32 {
         let id = self.inner.next_id.get();
         self.inner.next_id.set(id + 1);
@@ -123,8 +122,8 @@ impl Ui {
         self.inner.dialogs.borrow_mut().retain(|&h| h != hwnd);
     }
 
-    /// Give a keyboard message to the dialog that it is for (Tab, Enter, Esc). It gives
-    /// true if a dialog handled the message.
+    /// Give a keyboard message to the dialog that it belongs to (Tab, Enter, Esc). It gives
+    /// true if a dialog used the message.
     pub(crate) fn dialog_message(&self, msg: &MSG) -> bool {
         let dialogs = self.inner.dialogs.borrow().clone();
         dialogs

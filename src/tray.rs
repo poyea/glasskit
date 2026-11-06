@@ -138,7 +138,7 @@ impl Icon {
     }
 }
 
-/// A menu item as the window procedure keeps it: commands are numbers in the action list.
+/// A menu item as the window procedure keeps it. A command is an index into the command list.
 #[derive(Debug, Clone)]
 enum Entry {
     Action {
@@ -156,8 +156,8 @@ enum Entry {
     Quit(String),
 }
 
-/// The state that the window procedure uses. It has no type parameter, so one window class
-/// serves all command types.
+/// The state of the window procedure. It has no type parameter, so one window class serves
+/// all command types.
 struct Shared {
     entries: RefCell<Vec<Entry>>,
     /// It changes with each new menu. A choice from an older menu is not used.
@@ -209,8 +209,8 @@ impl<C: Clone + 'static> Tray<C> {
             ..Default::default()
         })?;
         unsafe {
-            // Use a hidden top-level window, not a message-only window.
-            // Only a top-level window gets the TaskbarCreated message when Explorer restarts.
+            // Use a hidden top-level window. A message-only window does not get the
+            // TaskbarCreated message when Explorer restarts.
             let hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
                 CLASS_NAME,
@@ -437,7 +437,7 @@ fn show_menu(hwnd: HWND, shared: &Shared) {
 
         let mut pt = POINT::default();
         let _ = GetCursorPos(&mut pt);
-        // This is necessary. Without it, the menu does not close when the user clicks outside it.
+        // Without this call, the menu does not close when the user clicks outside it.
         let _ = SetForegroundWindow(hwnd);
         let chosen = TrackPopupMenu(
             menu,
@@ -499,9 +499,9 @@ fn create_icon(image: &Icon) -> Result<HICON> {
     }
 }
 
-/// Make the menus follow the Windows dark mode, as the menus of File Explorer do.
-/// Windows has no public API for this. uxtheme.dll exports the functions only by number, since
-/// Windows 10 version 1903. If a function is missing, the menus stay light.
+/// Make the menus follow the Windows dark mode, as File Explorer does. Windows has no public
+/// API for this. uxtheme.dll exports the functions only by number. If a function is missing,
+/// the menus stay light.
 fn allow_dark_menus(hwnd: HWND) {
     unsafe {
         let Ok(uxtheme) = LoadLibraryW(w!("uxtheme.dll")) else {

@@ -847,7 +847,6 @@ impl Dialog {
                 Some(WPARAM(font.0 as usize)),
                 Some(LPARAM(1)),
             );
-            // Dark scroll bars, and a dark open list of a drop-down.
             if self.shared().look.theme.dark
                 && matches!(kind, Kind::Edit | Kind::List | Kind::DropDown)
             {
@@ -1084,8 +1083,8 @@ impl Dialog {
         self.shown = true;
         self.ui.add_dialog(self.hwnd);
         unsafe {
-            // The first ShowWindow of a process can use the show state from the shortcut or
-            // the parent process (for example, hidden or minimized). The second call is exact.
+            // The first ShowWindow call of a process can use the show state of the parent,
+            // such as hidden. The second call uses the state that is wanted.
             let _ = ShowWindow(self.hwnd, SW_SHOWNORMAL);
             let _ = ShowWindow(self.hwnd, SW_SHOWNORMAL);
             let _ = SetForegroundWindow(self.hwnd);
@@ -1169,7 +1168,7 @@ fn set_dwm_attribute(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE, value: u32) {
     }
 }
 
-/// The popup font at 14 px, or Segoe UI on Windows versions without it.
+/// The popup font at 14 px, or Segoe UI if Windows has no other face.
 fn ui_font(scale: f32, weight: i32) -> HFONT {
     let height = -(FONT_SIZE * scale).round() as i32;
     for face in FONT_FACES {
@@ -2036,7 +2035,7 @@ extern "system" fn placement_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let (x, y) = point();
                 let inside =
                     x >= window.left && x < window.right && y >= window.top && y < window.bottom;
-                // Drag from the point that was clicked, or bring the center of the window to it.
+                // Drag from the clicked point. A click outside the window moves its center there.
                 let grab = if inside {
                     (x - window.left, y - window.top)
                 } else {

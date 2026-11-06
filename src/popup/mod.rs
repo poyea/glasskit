@@ -52,7 +52,7 @@ use crate::ui::Notice;
 use glass::{Graphics, Scene};
 
 const CLASS_NAME: PCWSTR = w!("GlasskitChoicePopup");
-/// The window closes this long after the end of the fade-out, so that the last frame shows.
+/// The window closes this long after the fade-out, so the last frame shows.
 const FADE_OUT_EXTRA: Duration = Duration::from_millis(50);
 const COUNTDOWN_TICK: Duration = Duration::from_millis(200);
 const TIMER_COUNTDOWN: usize = 1;
@@ -70,8 +70,8 @@ const DISMISS_MIN_WIDTH: f32 = 72.0;
 const DISMISS_TEXT_PADDING: f32 = 12.0;
 const DISMISS_HEIGHT: f32 = 28.0;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// How a popup ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Response {
     /// The user clicked the choice at this index.
     Choice(usize),
@@ -83,8 +83,8 @@ pub enum Response {
     Quit,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// The answer of [`ChoicePopup::ask`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reply {
     /// How the popup ended.
     pub response: Response,
@@ -126,10 +126,9 @@ impl<'a> Prompt<'a> {
         }
     }
 
-    /// Show a result after a click on a choice. `marks` gets the index of the clicked choice
-    /// and gives the buttons to mark, as pairs of a choice index and a [`Mark`]. The popup
-    /// shows the marks for [`PopupStyle::hold`], then fades out. Indexes out
-    /// of range are ignored.
+    /// Show a result after a click on a choice. `marks` gets the clicked index and returns
+    /// the buttons to mark, as pairs of a choice index and a [`Mark`]. The popup shows the
+    /// marks for [`PopupStyle::hold`], then fades out. Indexes out of range are ignored.
     ///
     /// For a quiz with the correct answer at index 1:
     ///
@@ -607,9 +606,9 @@ fn countdown_label(dismiss: &str, seconds: u64) -> String {
     format!("{dismiss} ({seconds})")
 }
 
-/// The window procedure can run again inside a call that it makes (for example, `ReleaseCapture`
-/// sends `WM_CAPTURECHANGED`). Thus it gets only shared references, and the state that changes
-/// is in `Cell` and `RefCell`. Handlers do not destroy the window: they set `response`, and the
+/// The window procedure can run again inside a call that it makes. For example,
+/// `ReleaseCapture` sends `WM_CAPTURECHANGED`. Thus the state is shared and changes only in
+/// `Cell` and `RefCell`. Handlers do not destroy the window. They set `response`, and the
 /// loop in `ChoicePopup::ask` destroys the window.
 struct WindowState {
     id: u32,

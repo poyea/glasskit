@@ -34,7 +34,7 @@ use crate::ui::Notice;
 const CLASS_NAME: PCWSTR = w!("GlasskitEvents");
 const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
 const WTS_SESSION_UNLOCK: usize = 0x8;
-/// The number of 100 ns intervals from 1601-01-01 (FILETIME start) to 1970-01-01 (Unix start).
+/// Ticks of 100 ns from 1601-01-01 (FILETIME) to 1970-01-01 (Unix).
 const UNIX_EPOCH_AS_FILETIME: i64 = 116_444_736_000_000_000;
 
 /// The id of a [`ChoicePopup`](crate::popup::ChoicePopup), as [`Event::Popup`] gives it.
@@ -92,7 +92,7 @@ impl<C> EventLoop<C> {
             ..Default::default()
         })?;
         unsafe {
-            // A hidden top-level window: session notices go only to top-level windows.
+            // Session messages go only to top-level windows. The window stays hidden.
             let hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
                 CLASS_NAME,
@@ -110,7 +110,6 @@ impl<C> EventLoop<C> {
             .call("CreateWindowExW")?;
             let unlocked = Box::into_raw(Box::new(Cell::new(false)));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, unlocked as isize);
-            // Without it, the loop does not know when the user unlocks.
             let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
             Ok(Self {
                 ui: ui.clone(),
@@ -131,10 +130,9 @@ impl<C> EventLoop<C> {
         self.sources.push(source);
     }
 
-    /// Handle the window messages of the thread until there is something for the app. With
-    /// `until`, it also returns [`Event::Deadline`] at that clock time. The deadline stays
-    /// correct after sleep, hibernation, or a change of the clock. While it waits, the thread
-    /// uses no CPU.
+    /// Handle the window messages until there is something for the app. With `until`, it
+    /// also returns [`Event::Deadline`] at that clock time. The deadline stays exact after
+    /// sleep or a clock change. While it waits, the thread uses no CPU.
     pub fn next(&mut self, until: Option<SystemTime>) -> Result<Event<C>> {
         if until.is_none() {
             self.timer.cancel();
@@ -214,8 +212,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
     }
 }
 
-/// A positive due time is absolute for `SetWaitableTimer`, and a negative one is relative.
-/// Thus the value must stay positive: it saturates and never wraps.
+/// For `SetWaitableTimer`, a positive due time is absolute and a negative one is relative.
+/// The value must stay positive. It saturates at the maximum and does not wrap.
 fn absolute_due_time(at: SystemTime) -> i64 {
     let since_unix = at.duration_since(UNIX_EPOCH).unwrap_or_default();
     i64::try_from(since_unix.as_nanos().div_ceil(100))
@@ -223,8 +221,8 @@ fn absolute_due_time(at: SystemTime) -> i64 {
         .saturating_add(UNIX_EPOCH_AS_FILETIME)
 }
 
-/// An absolute timer fires at the correct clock time after sleep, hibernation, or a clock change.
-/// Thus the wait does not have to wake up to check the clock.
+/// An absolute timer fires at the right clock time after sleep or a clock change. The wait
+/// need not wake up to check the clock.
 struct DeadlineTimer(HANDLE);
 
 impl DeadlineTimer {
