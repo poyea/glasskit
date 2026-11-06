@@ -8,9 +8,10 @@
 use std::time::{Duration, SystemTime};
 
 use glasskit::Ui;
+use glasskit::events::{Event, EventLoop};
 use glasskit::placement::Placement;
-use glasskit::popup::{ChoicePopup, Mark, Prompt, Response};
-use glasskit::tray::{Icon, MenuItem, Tray, Wake};
+use glasskit::popup::{ChoicePopup, Mark, Prompt};
+use glasskit::tray::{Icon, MenuItem, Tray};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Command {
@@ -19,28 +20,35 @@ enum Command {
 
 fn main() -> glasskit::Result<()> {
     let ui = Ui::new()?;
+    let mut events = EventLoop::new(&ui)?;
     let size = Icon::tray_size();
     let icon = Icon::from_argb(size, vec![0xFF2E_86DE; (size * size) as usize])?;
-    let mut tray = Tray::new(&ui, "Quiz", &icon)?;
+    let mut tray = Tray::new(&mut events, "Quiz", &icon)?;
     tray.set_menu(&[
         MenuItem::command(Command::AskNow, "Ask now"),
         MenuItem::Separator,
         MenuItem::Quit("Quit".into()),
     ]);
     let mut popup = ChoicePopup::new(&ui, Placement::default())?;
+    let mut next = SystemTime::now() + Duration::from_secs(60);
     loop {
-        let next = SystemTime::now() + Duration::from_secs(60);
-        match tray.wait(Some(next))? {
-            Wake::Quit => return Ok(()),
-            Wake::SessionUnlocked => {}
-            Wake::Deadline | Wake::Command(Command::AskNow) => {
-                let prompt = Prompt::new("What is 2 + 2?", ["3", "4", "5"])
-                    .marks(|clicked| answer_marks(clicked, 1))
-                    .auto_dismiss(Some(Duration::from_secs(30)));
-                if popup.ask(&prompt)?.response == Response::Quit {
-                    return Ok(());
+        match events.next(Some(next))? {
+            Event::Quit => return Ok(()),
+            Event::Deadline | Event::Command(Command::AskNow) => {
+                next = SystemTime::now() + Duration::from_secs(60);
+                if !popup.is_showing() {
+                    let prompt = Prompt::new("What is 2 + 2?", ["3", "4", "5"])
+                        .marks(|clicked| answer_marks(clicked, 1))
+                        .auto_dismiss(Some(Duration::from_secs(30)));
+                    popup.show(&prompt)?;
                 }
             }
+            Event::Popup(id) if id == popup.id() => {
+                if let Some(reply) = popup.take_reply() {
+                    println!("{:?}", reply.response);
+                }
+            }
+            _ => {}
         }
     }
 }

@@ -3,11 +3,12 @@
 
 //! The setup that all `glasskit` windows of a thread share.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::{Rc, Weak};
 
 use windows::System::DispatcherQueueController;
-use windows::Win32::Foundation::HINSTANCE;
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::WinRT::{
     CreateDispatcherQueueController, DQTAT_COM_STA, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions,
@@ -19,6 +20,7 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
+use windows::Win32::UI::WindowsAndMessaging::{IsDialogMessageW, MSG, PostMessageW, WM_NULL};
 
 use crate::error::{Call, Result};
 
@@ -26,14 +28,25 @@ thread_local! {
     static CURRENT: RefCell<Weak<Inner>> = const { RefCell::new(Weak::new()) };
 }
 
+/// What a window tells the event loop: a popup or a dialog has something for the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Notice {
+    Popup(u32),
+    Dialog(u32),
+}
+
 struct Inner {
     hinstance: HINSTANCE,
     _dispatcher: DispatcherQueueController,
+    next_id: Cell<u32>,
+    notices: RefCell<VecDeque<Notice>>,
+    /// The dialogs that show now. The message loops give them their keyboard messages.
+    dialogs: RefCell<Vec<HWND>>,
 }
 
 /// Proof that the current thread is set up for `glasskit` windows.
 ///
-/// Create it once, on the thread that shows the windows, and give it to [`Tray::new`],
+/// Create it once, on the thread that shows the windows, and give it to [`EventLoop::new`],
 /// [`ChoicePopup::new`], and [`Dialog::new`]. Each of them keeps a copy, so the setup stays
 /// while any window exists. `Ui` is not [`Send`]: windows must stay on the thread that made
 /// them, and the compiler enforces it.
@@ -46,7 +59,7 @@ struct Inner {
 /// - It loads the standard common controls.
 /// - It creates the dispatcher queue that the popup animations need.
 ///
-/// [`Tray::new`]: crate::tray::Tray::new
+/// [`EventLoop::new`]: crate::events::EventLoop::new
 /// [`ChoicePopup::new`]: crate::popup::ChoicePopup::new
 /// [`Dialog::new`]: crate::dialog::Dialog::new
 #[derive(Clone)]
@@ -78,6 +91,9 @@ impl Ui {
             let inner = Rc::new(Inner {
                 hinstance,
                 _dispatcher: dispatcher,
+                next_id: Cell::new(1),
+                notices: RefCell::new(VecDeque::new()),
+                dialogs: RefCell::new(Vec::new()),
             });
             CURRENT.set(Rc::downgrade(&inner));
             Ok(Self { inner })
@@ -86,6 +102,48 @@ impl Ui {
 
     pub(crate) fn hinstance(&self) -> HINSTANCE {
         self.inner.hinstance
+    }
+
+    /// A number that no other popup or dialog of this thread has.
+    pub(crate) fn new_id(&self) -> u32 {
+        let id = self.inner.next_id.get();
+        self.inner.next_id.set(id + 1);
+        id
+    }
+
+    pub(crate) fn take_notice(&self) -> Option<Notice> {
+        self.inner.notices.borrow_mut().pop_front()
+    }
+
+    pub(crate) fn add_dialog(&self, hwnd: HWND) {
+        self.inner.dialogs.borrow_mut().push(hwnd);
+    }
+
+    pub(crate) fn remove_dialog(&self, hwnd: HWND) {
+        self.inner.dialogs.borrow_mut().retain(|&h| h != hwnd);
+    }
+
+    /// Give a keyboard message to the dialog that it is for (Tab, Enter, Esc). It gives
+    /// true if a dialog handled the message.
+    pub(crate) fn dialog_message(&self, msg: &MSG) -> bool {
+        let dialogs = self.inner.dialogs.borrow().clone();
+        dialogs
+            .into_iter()
+            .any(|hwnd| unsafe { IsDialogMessageW(hwnd, msg) }.as_bool())
+    }
+}
+
+/// Tell the event loop of this thread that a window has something for the app, and wake it.
+/// A notice that waits already is not added again.
+pub(crate) fn notify(notice: Notice) {
+    if let Some(inner) = CURRENT.with_borrow(Weak::upgrade) {
+        let mut notices = inner.notices.borrow_mut();
+        if !notices.contains(&notice) {
+            notices.push_back(notice);
+        }
+    }
+    unsafe {
+        let _ = PostMessageW(None, WM_NULL, WPARAM(0), LPARAM(0));
     }
 }
 
@@ -107,5 +165,27 @@ mod tests {
         drop(first);
         assert!(weak.upgrade().is_none());
         assert!(Ui::new().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+
+    #[test]
+    fn notices_come_once_in_order() {
+        let ui = Ui::new().unwrap();
+        notify(Notice::Popup(1));
+        notify(Notice::Dialog(2));
+        notify(Notice::Popup(1));
+        assert_eq!(ui.take_notice(), Some(Notice::Popup(1)));
+        assert_eq!(ui.take_notice(), Some(Notice::Dialog(2)));
+        assert_eq!(ui.take_notice(), None);
+    }
+
+    #[test]
+    fn ids_are_new_each_time() {
+        let ui = Ui::new().unwrap();
+        assert_ne!(ui.new_id(), ui.new_id());
     }
 }

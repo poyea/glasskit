@@ -1,50 +1,42 @@
 // Copyright (c) 2026 John Law
 // SPDX-License-Identifier: MIT
 
-//! A notification-area (tray) icon with a menu, and the wait loop of a tray app.
+//! A notification-area (tray) icon with a menu.
 //!
-//! [`Tray::wait`] is the main loop of the app: it handles the window messages of the thread and
-//! returns when the user picks a menu command, when a deadline comes, or when the user quits.
+//! A tray belongs to an [`EventLoop`]: when the user picks a menu command,
+//! [`EventLoop::next`](crate::events::EventLoop::next) gives
+//! [`Event::Command`](crate::events::Event::Command).
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::rc::{Rc, Weak};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, POINT, TRUE, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, TRUE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
     DeleteObject,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
-use windows::Win32::System::RemoteDesktop::{
-    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
-};
-use windows::Win32::System::Threading::{
-    CancelWaitableTimer, CreateWaitableTimerExW, INFINITE, SetWaitableTimer, TIMER_ALL_ACCESS,
-};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon,
-    DestroyMenu, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos, GetSystemMetrics,
-    GetWindowLongPtrW, HICON, HMENU, ICONINFO, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
-    PeekMessageW, PostMessageW, PostQuitMessage, QS_ALLINPUT, RegisterWindowMessageW, SM_CXSMICON,
+    DestroyMenu, DestroyWindow, GWLP_USERDATA, GetCursorPos, GetSystemMetrics, GetWindowLongPtrW,
+    HICON, HMENU, ICONINFO, MENU_ITEM_FLAGS, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR,
+    MF_STRING, PostMessageW, PostQuitMessage, RegisterWindowMessageW, SM_CXSMICON,
     SetForegroundWindow, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_LBUTTONUP,
-    WM_NCDESTROY, WM_NULL, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
+    TPM_RIGHTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_LBUTTONUP, WM_NCDESTROY, WM_NULL,
+    WM_RBUTTONUP, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::{BOOL, HSTRING, PCSTR, PCWSTR, w};
 
-use crate::Ui;
 use crate::error::{Call, Error, Result};
+use crate::events::{EventLoop, Source};
 
 const CLASS_NAME: PCWSTR = w!("GlasskitTray");
-const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
-const WTS_SESSION_UNLOCK: usize = 0x8;
 /// The numbers of the uxtheme.dll exports for dark menus. They have no names.
 const SET_PREFERRED_APP_MODE: u16 = 135;
 const ALLOW_DARK_MODE_FOR_WINDOW: u16 = 133;
@@ -55,24 +47,12 @@ const WM_TRAY: u32 = WM_APP + 1;
 const ICON_ID: u32 = 1;
 /// Menu item ids start here. 0 means that the user closed the menu without a choice.
 const FIRST_ID: usize = 1;
-/// The number of 100 ns intervals from 1601-01-01 (FILETIME start) to 1970-01-01 (Unix start).
-const UNIX_EPOCH_AS_FILETIME: i64 = 116_444_736_000_000_000;
-
-/// A positive due time is absolute for `SetWaitableTimer`, and a negative one is relative.
-/// Thus the value must stay positive: it saturates and never wraps.
-fn absolute_due_time(at: SystemTime) -> i64 {
-    let since_unix = at.duration_since(UNIX_EPOCH).unwrap_or_default();
-    i64::try_from(since_unix.as_nanos().div_ceil(100))
-        .unwrap_or(i64::MAX)
-        .saturating_add(UNIX_EPOCH_AS_FILETIME)
-}
-
 /// One item of the tray menu. `C` is the command type of the app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuItem<C> {
-    /// An item that the user can pick. [`Tray::wait`] then returns [`Wake::Command`].
+    /// An item that the user can pick. The event loop then gives [`Event::Command`](crate::events::Event::Command).
     Command {
-        /// The command that [`Tray::wait`] returns.
+        /// The command that the event loop gives.
         command: C,
         /// The text of the item.
         label: String,
@@ -92,8 +72,7 @@ pub enum MenuItem<C> {
         /// The items of the submenu.
         items: Vec<MenuItem<C>>,
     },
-    /// The item that ends the app. [`Tray::wait`] then returns [`Wake::Quit`]. If a popup or a
-    /// dialog shows at that time, it closes first and gives its own quit result.
+    /// The item that ends the app. The event loop then gives [`Event::Quit`](crate::events::Event::Quit).
     Quit(String),
 }
 
@@ -125,19 +104,6 @@ impl<C> MenuItem<C> {
         }
         self
     }
-}
-
-/// Why [`Tray::wait`] returned.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Wake<C> {
-    /// The time given to [`Tray::wait`] came.
-    Deadline,
-    /// The user unlocked the session: someone is at the screen again.
-    SessionUnlocked,
-    /// The user picked a command item.
-    Command(C),
-    /// The user picked the [`MenuItem::Quit`] item, or the thread got `WM_QUIT`.
-    Quit,
 }
 
 /// The picture of a tray icon.
@@ -199,27 +165,42 @@ struct Shared {
     chosen: RefCell<VecDeque<(u64, usize)>>,
     icon_data: RefCell<NOTIFYICONDATAW>,
     taskbar_created: u32,
-    unlocked: Cell<bool>,
+}
+
+/// What the event loop asks for commands: the window state and the commands of the menu.
+struct Core<C> {
+    shared: *const Shared,
+    commands: RefCell<Vec<C>>,
+}
+
+impl<C: Clone> Source<C> for Core<C> {
+    fn take_command(&self) -> Option<C> {
+        let shared = unsafe { &*self.shared };
+        loop {
+            let (generation, index) = shared.chosen.borrow_mut().pop_front()?;
+            if generation == shared.generation.get()
+                && let Some(command) = self.commands.borrow().get(index)
+            {
+                return Some(command.clone());
+            }
+        }
+    }
 }
 
 /// A tray icon and its menu. `C` is the command type of the app, for example an enum.
 ///
-/// Create it with a [`Ui`] on the thread that runs [`Tray::wait`].
+/// It gives its commands to the [`EventLoop`] that it was made with.
 pub struct Tray<C> {
-    _ui: Ui,
     hwnd: HWND,
     icon: HICON,
-    timer: DeadlineTimer,
-    shared: *const Shared,
-    commands: Vec<C>,
+    core: Rc<Core<C>>,
 }
 
-impl<C: Clone> Tray<C> {
+impl<C: Clone + 'static> Tray<C> {
     /// Add an icon with this tooltip to the notification area. The menu is empty until
     /// [`Tray::set_menu`].
-    pub fn new(ui: &Ui, tooltip: &str, icon: &Icon) -> Result<Self> {
-        let timer = DeadlineTimer::new()?;
-        let hinstance = ui.hinstance();
+    pub fn new(events: &mut EventLoop<C>, tooltip: &str, icon: &Icon) -> Result<Self> {
+        let hinstance = events.ui().hinstance();
         crate::register_class(&WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
@@ -268,22 +249,17 @@ impl<C: Clone> Tray<C> {
                 chosen: RefCell::new(VecDeque::new()),
                 icon_data: RefCell::new(data),
                 taskbar_created: RegisterWindowMessageW(w!("TaskbarCreated")),
-                unlocked: Cell::new(false),
             }));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, shared as isize);
             allow_dark_menus(hwnd);
-            // Without it, the tray does not know when the user unlocks. Then a held popup waits
-            // for its next check.
-            let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
 
-            let tray = Self {
-                _ui: ui.clone(),
-                hwnd,
-                icon,
-                timer,
+            let core = Rc::new(Core {
                 shared,
-                commands: Vec::new(),
-            };
+                commands: RefCell::new(Vec::new()),
+            });
+            let source: Weak<dyn Source<C>> = Rc::downgrade(&core) as Weak<dyn Source<C>>;
+            events.add_source(source);
+            let tray = Self { hwnd, icon, core };
             if !Shell_NotifyIconW(NIM_ADD, &data).as_bool() {
                 return Err(Error::TrayIconNotAdded);
             }
@@ -292,14 +268,15 @@ impl<C: Clone> Tray<C> {
     }
 
     fn shared(&self) -> &Shared {
-        unsafe { &*self.shared }
+        unsafe { &*self.core.shared }
     }
 
-    /// Replace the menu. A choice that the user made in the old menu and that [`Tray::wait`]
-    /// did not return yet is dropped.
+    /// Replace the menu. A choice that the user made in the old menu and that the event loop
+    /// did not give yet is dropped.
     pub fn set_menu(&mut self, items: &[MenuItem<C>]) {
-        self.commands.clear();
-        let entries = to_entries(items, &mut self.commands);
+        let mut commands = Vec::new();
+        let entries = to_entries(items, &mut commands);
+        self.core.commands.replace(commands);
         let shared = self.shared();
         shared.entries.replace(entries);
         shared.generation.set(shared.generation.get() + 1);
@@ -314,70 +291,17 @@ impl<C: Clone> Tray<C> {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &*data);
         }
     }
-
-    /// Handle the window messages of the thread until there is something for the app: a menu
-    /// command, the time `until` (if given), an unlock of the session, or a quit.
-    ///
-    /// The deadline is a clock time. It stays correct after sleep, hibernation, or a change of
-    /// the clock. While it waits, the thread uses no CPU.
-    pub fn wait(&self, until: Option<SystemTime>) -> Result<Wake<C>> {
-        if until.is_none() {
-            self.timer.cancel();
-        }
-        let shared = self.shared();
-        loop {
-            unsafe {
-                let mut msg = MSG::default();
-                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                    if msg.message == WM_QUIT {
-                        return Ok(Wake::Quit);
-                    }
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            }
-            loop {
-                let chosen = shared.chosen.borrow_mut().pop_front();
-                let Some((generation, index)) = chosen else {
-                    break;
-                };
-                if generation == shared.generation.get()
-                    && let Some(command) = self.commands.get(index)
-                {
-                    return Ok(Wake::Command(command.clone()));
-                }
-            }
-            if shared.unlocked.replace(false) {
-                return Ok(Wake::SessionUnlocked);
-            }
-            if let Some(t) = until {
-                if SystemTime::now() >= t {
-                    return Ok(Wake::Deadline);
-                }
-                self.timer.set(t)?;
-            }
-            unsafe {
-                MsgWaitForMultipleObjectsEx(
-                    Some(&[self.timer.0]),
-                    INFINITE,
-                    QS_ALLINPUT,
-                    MWMO_INPUTAVAILABLE,
-                );
-            }
-        }
-    }
 }
 
 impl<C> Drop for Tray<C> {
     fn drop(&mut self) {
         unsafe {
-            let data = (*self.shared).icon_data.borrow();
+            let data = (*self.core.shared).icon_data.borrow();
             let _ = Shell_NotifyIconW(NIM_DELETE, &*data);
             drop(data);
             let _ = DestroyIcon(self.icon);
-            let _ = WTSUnRegisterSessionNotification(self.hwnd);
             let _ = DestroyWindow(self.hwnd);
-            drop(Box::from_raw(self.shared as *mut Shared));
+            drop(Box::from_raw(self.core.shared as *mut Shared));
         }
     }
 }
@@ -418,39 +342,6 @@ fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
     data.szTip[..wide.len()].copy_from_slice(&wide);
 }
 
-/// An absolute timer fires at the correct clock time after sleep, hibernation, or a clock change.
-/// Thus the wait does not have to wake up to check the clock.
-struct DeadlineTimer(HANDLE);
-
-impl DeadlineTimer {
-    fn new() -> Result<Self> {
-        let handle = unsafe {
-            CreateWaitableTimerExW(None, PCWSTR::null(), 0, TIMER_ALL_ACCESS.0)
-                .call("CreateWaitableTimerExW")?
-        };
-        Ok(Self(handle))
-    }
-
-    fn set(&self, at: SystemTime) -> Result<()> {
-        let due = absolute_due_time(at);
-        unsafe { SetWaitableTimer(self.0, &due, 0, None, None, false).call("SetWaitableTimer") }
-    }
-
-    fn cancel(&self) {
-        unsafe {
-            let _ = CancelWaitableTimer(self.0);
-        }
-    }
-}
-
-impl Drop for DeadlineTimer {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseHandle(self.0);
-        }
-    }
-}
-
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         let shared = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Shared;
@@ -463,12 +354,6 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let event = (lparam.0 & 0xFFFF) as u32;
                 if event == WM_LBUTTONUP || event == WM_RBUTTONUP {
                     show_menu(hwnd, shared);
-                }
-                LRESULT(0)
-            }
-            WM_WTSSESSION_CHANGE => {
-                if wparam.0 == WTS_SESSION_UNLOCK {
-                    shared.unlocked.set(true);
                 }
                 LRESULT(0)
             }
@@ -640,34 +525,7 @@ fn allow_dark_menus(hwnd: HWND) {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
-
-    #[test]
-    fn due_time_counts_from_1601() {
-        assert_eq!(absolute_due_time(UNIX_EPOCH), UNIX_EPOCH_AS_FILETIME);
-        let one_second = UNIX_EPOCH + Duration::from_secs(1);
-        assert_eq!(
-            absolute_due_time(one_second),
-            UNIX_EPOCH_AS_FILETIME + 10_000_000
-        );
-    }
-
-    #[test]
-    fn due_time_stays_positive_far_in_the_future() {
-        const YEAR: u64 = 365 * 24 * 60 * 60;
-        let far = UNIX_EPOCH
-            .checked_add(Duration::from_secs(20_000 * YEAR))
-            .expect("SystemTime holds 20000 years");
-        assert!(absolute_due_time(far) > UNIX_EPOCH_AS_FILETIME);
-    }
-
-    #[test]
-    fn due_time_before_1970_is_1970() {
-        let before = UNIX_EPOCH - Duration::from_secs(60);
-        assert_eq!(absolute_due_time(before), UNIX_EPOCH_AS_FILETIME);
-    }
 
     #[test]
     fn icon_needs_one_pixel_per_cell() {

@@ -21,6 +21,9 @@ pub enum Error {
     CurrentExe(std::io::Error),
     /// Windows did not add the tray icon. This can occur while Explorer is not running.
     TrayIconNotAdded,
+    /// [`ChoicePopup::show`](crate::popup::ChoicePopup::show) was called while a prompt of
+    /// the same popup showed.
+    PopupShowing,
     /// The number of pixels of an icon is not the square of its size.
     InvalidIcon {
         /// The width and height of the icon.
@@ -50,6 +53,7 @@ impl fmt::Display for Error {
             Error::Windows { context, source } => write!(f, "{context} failed: {source}"),
             Error::CurrentExe(_) => f.write_str("the path of the executable is not available"),
             Error::TrayIconNotAdded => f.write_str("Windows did not add the tray icon"),
+            Error::PopupShowing => f.write_str("the popup shows a prompt already"),
             Error::InvalidIcon { size, pixels } => write!(
                 f,
                 "an icon of size {size} needs {} pixels, not {pixels}",

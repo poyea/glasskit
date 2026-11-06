@@ -6,8 +6,9 @@
 //! Native Windows UI with a glass look: a tray icon and menu, a frosted-glass popup, themed
 //! dialogs, and helpers for tray apps.
 //!
-//! - [`tray`]: an icon in the notification area with a menu, and [`Tray::wait`], the main
-//!   loop of the app. It sleeps until a menu command, a deadline, or an unlock of the session.
+//! - [`events`]: [`EventLoop`], the main loop of the app. It sleeps until a menu command, the
+//!   end of a popup, a change in a dialog, a deadline, or an unlock of the session.
+//! - [`tray`]: an icon in the notification area with a menu.
 //! - [`popup`]: a frosted-glass popup with a question and choice buttons. It fades in without
 //!   taking the keyboard focus, can show whether a choice was correct, and can dismiss itself.
 //! - [`dialog`]: a small modal window made of standard controls, in the same colors.
@@ -22,8 +23,9 @@
 //!
 //! Make one [`Ui`] on the thread that shows the windows, and make all windows on that thread.
 //! [`Ui`] is not `Send`, so the compiler stops a window from going to another thread. The
-//! thread must run the loops of [`Tray::wait`], [`ChoicePopup::ask`], and [`Dialog::run`]:
-//! each of them handles the window messages of the thread while it waits.
+//! thread must run [`EventLoop::next`], which handles the window messages of all windows of
+//! the thread. An app without a tray can use [`ChoicePopup::ask`] and [`Dialog::run`]
+//! instead: each of them has a message loop of its own and returns when its window ends.
 //!
 //! # Example
 //!
@@ -34,9 +36,10 @@
 //! use std::time::{Duration, SystemTime};
 //!
 //! use glasskit::Ui;
+//! use glasskit::events::{Event, EventLoop};
 //! use glasskit::placement::Placement;
-//! use glasskit::popup::{ChoicePopup, Mark, Prompt, Response};
-//! use glasskit::tray::{Icon, MenuItem, Tray, Wake};
+//! use glasskit::popup::{ChoicePopup, Mark, Prompt};
+//! use glasskit::tray::{Icon, MenuItem, Tray};
 //!
 //! #[derive(Debug, Clone, PartialEq, Eq)]
 //! enum Command {
@@ -45,28 +48,35 @@
 //!
 //! fn main() -> glasskit::Result<()> {
 //!     let ui = Ui::new()?;
+//!     let mut events = EventLoop::new(&ui)?;
 //!     let size = Icon::tray_size();
 //!     let icon = Icon::from_argb(size, vec![0xFF2E_86DE; (size * size) as usize])?;
-//!     let mut tray = Tray::new(&ui, "Quiz", &icon)?;
+//!     let mut tray = Tray::new(&mut events, "Quiz", &icon)?;
 //!     tray.set_menu(&[
 //!         MenuItem::command(Command::AskNow, "Ask now"),
 //!         MenuItem::Separator,
 //!         MenuItem::Quit("Quit".into()),
 //!     ]);
 //!     let mut popup = ChoicePopup::new(&ui, Placement::default())?;
+//!     let mut next = SystemTime::now() + Duration::from_secs(60);
 //!     loop {
-//!         let next = SystemTime::now() + Duration::from_secs(60);
-//!         match tray.wait(Some(next))? {
-//!             Wake::Quit => return Ok(()),
-//!             Wake::SessionUnlocked => {}
-//!             Wake::Deadline | Wake::Command(Command::AskNow) => {
-//!                 let prompt = Prompt::new("What is 2 + 2?", ["3", "4", "5"])
-//!                     .marks(|clicked| answer_marks(clicked, 1))
-//!                     .auto_dismiss(Some(Duration::from_secs(30)));
-//!                 if popup.ask(&prompt)?.response == Response::Quit {
-//!                     return Ok(());
+//!         match events.next(Some(next))? {
+//!             Event::Quit => return Ok(()),
+//!             Event::Deadline | Event::Command(Command::AskNow) => {
+//!                 next = SystemTime::now() + Duration::from_secs(60);
+//!                 if !popup.is_showing() {
+//!                     let prompt = Prompt::new("What is 2 + 2?", ["3", "4", "5"])
+//!                         .marks(|clicked| answer_marks(clicked, 1))
+//!                         .auto_dismiss(Some(Duration::from_secs(30)));
+//!                     popup.show(&prompt)?;
 //!                 }
 //!             }
+//!             Event::Popup(id) if id == popup.id() => {
+//!                 if let Some(reply) = popup.take_reply() {
+//!                     println!("{:?}", reply.response);
+//!                 }
+//!             }
+//!             _ => {}
 //!         }
 //!     }
 //! }
@@ -81,7 +91,8 @@
 //! }
 //! ```
 //!
-//! [`Tray::wait`]: tray::Tray::wait
+//! [`EventLoop`]: events::EventLoop
+//! [`EventLoop::next`]: events::EventLoop::next
 //! [`ChoicePopup::ask`]: popup::ChoicePopup::ask
 //! [`Dialog::run`]: dialog::Dialog::run
 
@@ -91,6 +102,7 @@ compile_error!("glasskit works only on Windows: it uses the Win32 and Windows Ru
 pub mod autostart;
 pub mod dialog;
 pub mod error;
+pub mod events;
 pub mod layout;
 pub mod placement;
 pub mod popup;

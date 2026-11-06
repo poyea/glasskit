@@ -55,25 +55,26 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_NUMBER, ES_WANTRETURN,
     GWLP_USERDATA, GetClientRect, GetDlgCtrlID, GetDlgItem, GetMessageW, GetParent,
     GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, IDC_SIZEALL,
-    IsDialogMessageW, LB_ADDSTRING, LB_DELETESTRING, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN,
-    LB_INSERTSTRING, LB_RESETCONTENT, LB_SETCURSEL, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT,
-    LBS_NOTIFY, LBS_OWNERDRAWFIXED, LoadCursorW, MB_ICONWARNING, MB_OK, MSG, MessageBoxW,
-    PostQuitMessage, SPI_GETWORKAREA, SW_SHOWNORMAL, SWP_NOSIZE, SWP_NOZORDER,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPos, SetWindowTextW, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
-    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ENABLE, WM_ERASEBKGND, WM_GETDLGCODE,
-    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE,
-    WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WNDCLASSEXW, WS_CAPTION, WS_CHILD,
-    WS_EX_APPWINDOW, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+    LB_ADDSTRING, LB_DELETESTRING, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_INSERTSTRING,
+    LB_RESETCONTENT, LB_SETCURSEL, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY,
+    LBS_OWNERDRAWFIXED, LoadCursorW, MB_ICONWARNING, MB_OK, MSG, MessageBoxW, PostQuitMessage,
+    SPI_GETWORKAREA, SW_SHOWNORMAL, SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED,
+    WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DRAWITEM,
+    WM_ENABLE, WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SETFONT,
+    WNDCLASSEXW, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME,
+    WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 use windows_numerics::Vector2;
 
 use crate::Ui;
+use crate::events::DialogId;
 use crate::placement::{Area, Placement, SCREEN_MARGIN};
 use crate::theme::{Theme, colorref, over, rgba};
+use crate::ui::Notice;
 
 const CLASS_NAME: PCWSTR = w!("GlasskitDialog");
 const PLACEMENT_CLASS: PCWSTR = w!("GlasskitPlacement");
@@ -490,6 +491,7 @@ fn rounded(left: f32, top: f32, right: f32, bottom: f32, radius: f32) -> D2D1_RO
 /// The window procedure only puts events in the queue. [`Dialog::run`] gives them to the handler
 /// outside the window procedure, so the handler can change the controls safely.
 struct Shared {
+    id: u32,
     kinds: RefCell<Vec<Kind>>,
     surfaces: RefCell<Vec<Surface>>,
     checked: RefCell<Vec<bool>>,
@@ -510,6 +512,12 @@ struct Shared {
 }
 
 impl Shared {
+    /// Queue an event for the app, and wake the event loop.
+    fn push(&self, event: Event) {
+        self.events.borrow_mut().push_back(event);
+        crate::ui::notify(Notice::Dialog(self.id));
+    }
+
     fn index_of(&self, child: HWND) -> Option<usize> {
         let id = unsafe { GetDlgCtrlID(child) } as usize;
         let index = id.checked_sub(FIRST_ID)?;
@@ -522,7 +530,9 @@ impl Shared {
 /// Make it with [`Dialog::new`], add the controls with the `add_` methods, then call
 /// [`Dialog::run`]. The window closes when the `Dialog` is dropped.
 pub struct Dialog {
-    _ui: Ui,
+    ui: Ui,
+    id: DialogId,
+    shown: bool,
     hwnd: HWND,
     font: HFONT,
     heading_font: HFONT,
@@ -594,6 +604,7 @@ impl Dialog {
             set_dwm_attribute(hwnd, DWMWA_CAPTION_COLOR, colorref(look.window).0);
             set_dwm_attribute(hwnd, DWMWA_TEXT_COLOR, look.text().0);
 
+            let id = ui.new_id();
             let shared = Box::into_raw(Box::new(Shared {
                 kinds: RefCell::new(Vec::new()),
                 surfaces: RefCell::new(Vec::new()),
@@ -604,6 +615,7 @@ impl Dialog {
                 window_sizes: RefCell::new(Vec::new()),
                 grab: Cell::new(None),
                 hover: Cell::new(None),
+                id,
                 events: RefCell::new(VecDeque::new()),
                 muted: Cell::new(false),
                 look,
@@ -625,7 +637,9 @@ impl Dialog {
             }
 
             Ok(Self {
-                _ui: ui.clone(),
+                ui: ui.clone(),
+                id: DialogId(id),
+                shown: false,
                 hwnd,
                 font: ui_font(scale, FW_NORMAL.0 as i32),
                 heading_font: ui_font(scale, FW_SEMIBOLD.0 as i32),
@@ -1053,30 +1067,54 @@ impl Dialog {
         }
     }
 
-    /// Show the dialog and give each event to `handler` until it returns [`Flow::Close`].
-    pub fn run(&mut self, mut handler: impl FnMut(&mut Dialog, Event) -> Flow) -> Result<Outcome> {
+    /// The id that [`Event::Dialog`](crate::events::Event::Dialog) gives when this dialog has
+    /// events.
+    pub fn id(&self) -> DialogId {
+        self.id
+    }
+
+    /// Show the dialog and return at once. When the user does something, the event loop gives
+    /// [`Event::Dialog`](crate::events::Event::Dialog) with [`Dialog::id`]; then call
+    /// [`Dialog::next_event`] until it gives `None`. The dialog stays until it is dropped, and
+    /// other windows go on working while it shows.
+    pub fn show(&mut self) {
+        if self.shown {
+            return;
+        }
+        self.shown = true;
+        self.ui.add_dialog(self.hwnd);
         unsafe {
             // The first ShowWindow of a process can use the show state from the shortcut or
             // the parent process (for example, hidden or minimized). The second call is exact.
             let _ = ShowWindow(self.hwnd, SW_SHOWNORMAL);
             let _ = ShowWindow(self.hwnd, SW_SHOWNORMAL);
             let _ = SetForegroundWindow(self.hwnd);
-            if let Some(first) =
-                (0..self.controls.len()).find(|&index| self.kind(index) != Kind::Static)
-            {
-                self.focus(AnyId(first));
-            }
-            let mut msg = MSG::default();
-            loop {
-                loop {
-                    let event = self.shared().events.borrow_mut().pop_front();
-                    let Some(event) = event else {
-                        break;
-                    };
-                    if handler(self, event) == Flow::Close {
-                        return Ok(Outcome::Closed);
-                    }
+        }
+        if let Some(first) =
+            (0..self.controls.len()).find(|&index| self.kind(index) != Kind::Static)
+        {
+            self.focus(AnyId(first));
+        }
+    }
+
+    /// The next thing that the user did, or `None` when there is nothing more now.
+    pub fn next_event(&mut self) -> Option<Event> {
+        self.shared().events.borrow_mut().pop_front()
+    }
+
+    /// Show the dialog and give each event to `handler` until it returns [`Flow::Close`], with a
+    /// message loop of its own. It is for an app without an
+    /// [`EventLoop`](crate::events::EventLoop); with one, use [`Dialog::show`].
+    pub fn run(&mut self, mut handler: impl FnMut(&mut Dialog, Event) -> Flow) -> Result<Outcome> {
+        self.show();
+        let mut msg = MSG::default();
+        loop {
+            while let Some(event) = self.next_event() {
+                if handler(self, event) == Flow::Close {
+                    return Ok(Outcome::Closed);
                 }
+            }
+            unsafe {
                 match GetMessageW(&mut msg, None, 0, 0).0 {
                     0 => {
                         PostQuitMessage(msg.wParam.0 as i32);
@@ -1087,7 +1125,7 @@ impl Dialog {
                     }
                     _ => {}
                 }
-                if !IsDialogMessageW(self.hwnd, &msg).as_bool() {
+                if !self.ui.dialog_message(&msg) {
                     let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
@@ -1098,6 +1136,7 @@ impl Dialog {
 
 impl Drop for Dialog {
     fn drop(&mut self) {
+        self.ui.remove_dialog(self.hwnd);
         unsafe {
             let _ = DestroyWindow(self.hwnd);
             for font in [self.font, self.heading_font] {
@@ -1727,12 +1766,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     _ => None,
                 };
                 if let Some(event) = event {
-                    shared.events.borrow_mut().push_back(event);
+                    shared.push(event);
                 }
                 LRESULT(0)
             }
             WM_CLOSE => {
-                shared.events.borrow_mut().push_back(Event::Close);
+                shared.push(Event::Close);
                 LRESULT(0)
             }
             WM_NCDESTROY => {
@@ -1954,10 +1993,7 @@ fn user_placement(shared: &Shared, index: usize, hwnd: HWND, placement: Placemen
         let _ = InvalidateRect(Some(hwnd), None, false);
     }
     if !shared.muted.get() {
-        shared
-            .events
-            .borrow_mut()
-            .push_back(Event::Changed(AnyId(index)));
+        shared.push(Event::Changed(AnyId(index)));
     }
 }
 

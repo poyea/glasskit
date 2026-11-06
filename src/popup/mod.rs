@@ -12,7 +12,7 @@ use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::error::{Call, Result};
+use crate::error::{Call, Error, Result};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, TRUE, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{
@@ -34,19 +34,21 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetMessageW,
     GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, IsWindow, KillTimer, LoadCursorW,
-    MA_NOACTIVATE, MSG, PostMessageW, PostQuitMessage, SPI_GETWORKAREA, SW_SHOWNOACTIVATE,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor,
-    SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    MA_NOACTIVATE, MSG, PostQuitMessage, SPI_GETWORKAREA, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetCursor, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage,
     WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCDESTROY,
-    WM_NULL, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, w};
 use windows_numerics::Vector2;
 
 use crate::Ui;
+use crate::events::PopupId;
 use crate::placement::{Area, Placement, SCREEN_MARGIN};
 use crate::theme::Theme;
+use crate::ui::Notice;
 use glass::{Graphics, Scene};
 
 const CLASS_NAME: PCWSTR = w!("GlasskitChoicePopup");
@@ -204,12 +206,14 @@ impl Default for PopupStyle {
 
 /// A popup that asks one [`Prompt`] at a time.
 ///
-/// It keeps no window between prompts: [`ChoicePopup::ask`] makes the window and the GPU
-/// resources, and frees them before it returns.
+/// It keeps no window between prompts: [`ChoicePopup::show`] makes the window and the GPU
+/// resources, and [`ChoicePopup::take_reply`] frees them.
 pub struct ChoicePopup {
     ui: Ui,
+    id: PopupId,
     placement: Placement,
     style: PopupStyle,
+    active: Option<Active>,
 }
 
 fn primary_monitor_scale() -> f32 {
@@ -244,15 +248,35 @@ impl ChoicePopup {
         })?;
         Ok(Self {
             ui: ui.clone(),
+            id: PopupId(ui.new_id()),
             placement,
             style: PopupStyle::default(),
+            active: None,
         })
     }
 
-    /// Show the prompt and wait until it ends: the user clicks a choice or the dismiss button,
-    /// the countdown ends, or the thread gets `WM_QUIT`. A click on the dismiss button, or on a
-    /// choice of a prompt without marks, closes the popup immediately.
-    pub fn ask(&mut self, request: &Prompt) -> Result<Reply> {
+    /// The id that [`Event::Popup`](crate::events::Event::Popup) gives when a prompt of this
+    /// popup ends.
+    pub fn id(&self) -> PopupId {
+        self.id
+    }
+
+    /// Whether a prompt shows now.
+    pub fn is_showing(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// Show the prompt and return at once. The prompt ends when the user clicks a choice or the
+    /// dismiss button, or when the countdown ends. Then the event loop gives
+    /// [`Event::Popup`](crate::events::Event::Popup) with [`ChoicePopup::id`], and
+    /// [`ChoicePopup::take_reply`] gives the reply. A click on the dismiss button, or on a choice
+    /// of a prompt without marks, ends the prompt at once.
+    ///
+    /// It fails with [`Error::PopupShowing`] while another prompt of this popup shows.
+    pub fn show(&mut self, request: &Prompt) -> Result<()> {
+        if self.active.is_some() {
+            return Err(Error::PopupShowing);
+        }
         let prompt = request.text;
         let choices: &[&str] = &request.choices;
         let dismiss = request.dismiss;
@@ -349,6 +373,7 @@ impl ChoicePopup {
             };
 
             let state = Box::into_raw(Box::new(WindowState {
+                id: self.id.0,
                 style: self.style,
                 layout: RefCell::new(layout),
                 scene,
@@ -395,39 +420,95 @@ impl ChoicePopup {
                 Ok(())
             })();
 
-            let mut quit = None;
-            if shown.is_ok() {
-                let mut msg = MSG::default();
-                while shared.response.get().is_none() {
-                    match GetMessageW(&mut msg, None, 0, 0).0 {
-                        0 => {
-                            quit = Some(msg.wParam.0 as i32);
-                            break;
-                        }
-                        -1 => break,
-                        _ => {}
-                    }
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            }
-
-            if IsWindow(Some(hwnd)).as_bool() {
+            if let Err(err) = shown {
                 let _ = DestroyWindow(hwnd);
+                drop(Box::from_raw(state));
+                return Err(err);
             }
-            let state = Box::from_raw(state);
-            if let Some(code) = quit {
-                PostQuitMessage(code);
+            self.active = Some(Active {
+                hwnd,
+                state,
+                _gfx: gfx,
+            });
+            Ok(())
+        }
+    }
+
+    /// The reply of the prompt, once it has ended. It closes the window and frees its GPU
+    /// resources. It gives `None` while the prompt still shows, and when no prompt shows.
+    pub fn take_reply(&mut self) -> Option<Reply> {
+        let active = self.active.as_ref()?;
+        let state = unsafe { &*active.state };
+        let response = state.response.get()?;
+        let at = state.decided_at.get().unwrap_or_else(SystemTime::now);
+        self.close();
+        Some(Reply { response, at })
+    }
+
+    /// Close the prompt that shows, without a reply.
+    pub fn close(&mut self) {
+        if let Some(active) = self.active.take() {
+            active.close();
+        }
+    }
+
+    /// Show the prompt and wait until it ends, with a message loop of its own. It is for an app
+    /// without an [`EventLoop`](crate::events::EventLoop); with one, use
+    /// [`ChoicePopup::show`]. If the thread gets `WM_QUIT`, the popup closes, posts `WM_QUIT`
+    /// again for the caller, and gives [`Response::Quit`].
+    pub fn ask(&mut self, request: &Prompt) -> Result<Reply> {
+        self.show(request)?;
+        let mut msg = MSG::default();
+        loop {
+            if let Some(reply) = self.take_reply() {
+                return Ok(reply);
             }
-            shown?;
-            let response = match quit {
-                Some(_) => Response::Quit,
-                None => state.response.get().unwrap_or(Response::Dismissed),
-            };
-            Ok(Reply {
-                response,
-                at: state.decided_at.get().unwrap_or_else(SystemTime::now),
-            })
+            match unsafe { GetMessageW(&mut msg, None, 0, 0).0 } {
+                0 => {
+                    let at = SystemTime::now();
+                    self.close();
+                    unsafe { PostQuitMessage(msg.wParam.0 as i32) };
+                    return Ok(Reply {
+                        response: Response::Quit,
+                        at,
+                    });
+                }
+                -1 => {
+                    self.close();
+                    return Err(Error::last("GetMessageW"));
+                }
+                _ => unsafe {
+                    if !self.ui.dialog_message(&msg) {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                },
+            }
+        }
+    }
+}
+
+impl Drop for ChoicePopup {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// The window of a prompt that shows, and what it needs.
+struct Active {
+    hwnd: HWND,
+    state: *mut WindowState,
+    /// The GPU resources. They go last, after the window and its scene.
+    _gfx: Graphics,
+}
+
+impl Active {
+    fn close(self) {
+        unsafe {
+            if IsWindow(Some(self.hwnd)).as_bool() {
+                let _ = DestroyWindow(self.hwnd);
+            }
+            drop(Box::from_raw(self.state));
         }
     }
 }
@@ -531,6 +612,7 @@ fn countdown_label(dismiss: &str, seconds: u64) -> String {
 /// is in `Cell` and `RefCell`. Handlers do not destroy the window: they set `response`, and the
 /// loop in `ChoicePopup::ask` destroys the window.
 struct WindowState {
+    id: u32,
     style: PopupStyle,
     layout: RefCell<Layout>,
     scene: Scene,
@@ -552,6 +634,15 @@ struct WindowState {
 }
 
 impl WindowState {
+    /// End the prompt with this response, and wake the event loop. A later response is
+    /// ignored.
+    fn finish(&self, response: Response) {
+        if self.response.get().is_none() {
+            self.response.set(Some(response));
+            crate::ui::notify(Notice::Popup(self.id));
+        }
+    }
+
     fn tick(&self, hwnd: HWND) {
         let seconds = {
             let mut countdown = self.countdown.borrow_mut();
@@ -642,7 +733,7 @@ impl WindowState {
                 Err(_) => false,
             };
             if !started {
-                self.response.set(Some(response));
+                self.finish(response);
             }
         }
     }
@@ -750,7 +841,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             state.fade_out(hwnd, Response::Choice(selected));
                         }
                     }
-                    TIMER_FADE_OUT => state.response.set(state.pending.get()),
+                    TIMER_FADE_OUT => {
+                        if let Some(response) = state.pending.get() {
+                            state.finish(response);
+                        }
+                    }
                     _ => {}
                 }
                 LRESULT(0)
@@ -806,7 +901,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                             Response::Choice(choice) if state.marks.is_some() => {
                                 state.show_feedback(hwnd, choice);
                             }
-                            _ => state.response.set(Some(response)),
+                            _ => state.finish(response),
                         }
                     }
                     Some(_) => {
@@ -818,12 +913,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_DESTROY => {
-                if state.response.get().is_none() {
-                    state.response.set(Some(Response::Dismissed));
-                }
-                // Wake the loop in `ask`. If a sent message (not a posted message) destroyed the window,
-                // GetMessageW continues to wait.
-                let _ = PostMessageW(None, WM_NULL, WPARAM(0), LPARAM(0));
+                state.finish(Response::Dismissed);
                 LRESULT(0)
             }
             WM_NCDESTROY => {
