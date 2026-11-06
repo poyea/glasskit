@@ -77,7 +77,8 @@ impl Ui {
             return Ok(Self { inner });
         }
         unsafe {
-            // Both calls fail if the manifest or the app already chose the same value. That is harmless.
+            // Both calls fail if the manifest or the app already chose the same value.
+            // That is harmless.
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             let _ = RoInitialize(RO_INIT_SINGLETHREADED);
             let _ = InitCommonControlsEx(&INITCOMMONCONTROLSEX {
