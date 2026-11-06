@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::rc::{Rc, Weak};
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, TRUE, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, TRUE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
     DeleteObject,
@@ -197,20 +197,15 @@ impl Drop for IconHandle {
     }
 }
 
-/// A tray icon and its menu. `C` is the command type of the app, for example an enum.
-///
-/// It gives its commands to the [`EventLoop`] that it was made with.
-pub struct Tray<C> {
+/// The icon, its window, and the state of the window procedure. None of it depends on the
+/// command type, so the compiler builds this code once.
+struct Native {
     window: Window<Shared>,
     _icon: IconHandle,
-    core: Rc<Core<C>>,
 }
 
-impl<C: Clone + 'static> Tray<C> {
-    /// Add an icon with this tooltip to the notification area. The menu is empty until
-    /// [`Tray::set_menu`].
-    pub fn new(events: &mut EventLoop<C>, tooltip: &str, icon: &Icon) -> Result<Self> {
-        let hinstance = events.ui().hinstance();
+impl Native {
+    fn new(hinstance: HINSTANCE, tooltip: &str, icon: &Icon) -> Result<Self> {
         window::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
         let icon = IconHandle(create_icon(icon)?);
         // Use a hidden top-level window. A message-only window does not get the
@@ -233,29 +228,62 @@ impl<C: Clone + 'static> Tray<C> {
             icon_data: RefCell::new(data),
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
         });
-        let window = Window::attach(hwnd, Rc::clone(&shared));
+        let native = Self {
+            window: Window::attach(hwnd, shared),
+            _icon: icon,
+        };
         allow_dark_menus(hwnd);
+        let added =
+            unsafe { Shell_NotifyIconW(NIM_ADD, &*native.window.state().icon_data.borrow()) };
+        if !added.as_bool() {
+            return Err(Error::TrayIconNotAdded);
+        }
+        Ok(native)
+    }
 
+    fn set_entries(&self, entries: Vec<Entry>) {
+        let shared = self.window.state();
+        shared.entries.replace(entries);
+        shared.generation.set(shared.generation.get() + 1);
+    }
+
+    fn set_tooltip(&self, tooltip: &str) {
+        let mut data = self.window.state().icon_data.borrow_mut();
+        set_tip(&mut data, tooltip);
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &*data);
+        }
+    }
+}
+
+impl Drop for Native {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_DELETE, &*self.window.state().icon_data.borrow());
+        }
+    }
+}
+
+/// A tray icon and its menu. `C` is the command type of the app, for example an enum.
+///
+/// It gives its commands to the [`EventLoop`] that it was made with.
+pub struct Tray<C> {
+    native: Native,
+    core: Rc<Core<C>>,
+}
+
+impl<C: Clone + 'static> Tray<C> {
+    /// Add an icon with this tooltip to the notification area. The menu is empty until
+    /// [`Tray::set_menu`].
+    pub fn new(events: &mut EventLoop<C>, tooltip: &str, icon: &Icon) -> Result<Self> {
+        let native = Native::new(events.ui().hinstance(), tooltip, icon)?;
         let core = Rc::new(Core {
-            shared,
+            shared: native.window.share(),
             commands: RefCell::new(Vec::new()),
         });
         let source: Weak<dyn Source<C>> = Rc::downgrade(&core) as Weak<dyn Source<C>>;
         events.add_source(source);
-        let tray = Self {
-            window,
-            _icon: icon,
-            core,
-        };
-        let added = unsafe { Shell_NotifyIconW(NIM_ADD, &data) };
-        if !added.as_bool() {
-            return Err(Error::TrayIconNotAdded);
-        }
-        Ok(tray)
-    }
-
-    fn shared(&self) -> &Shared {
-        self.window.state()
+        Ok(Self { native, core })
     }
 
     /// Replace the menu. A choice that the user made in the old menu and that the event loop
@@ -264,27 +292,13 @@ impl<C: Clone + 'static> Tray<C> {
         let mut commands = Vec::new();
         let entries = to_entries(items, &mut commands);
         self.core.commands.replace(commands);
-        let shared = self.shared();
-        shared.entries.replace(entries);
-        shared.generation.set(shared.generation.get() + 1);
+        self.native.set_entries(entries);
     }
 
     /// Change the text that shows when the pointer is on the icon. Windows shows up to 127
     /// characters.
     pub fn set_tooltip(&self, tooltip: &str) {
-        let mut data = self.shared().icon_data.borrow_mut();
-        set_tip(&mut data, tooltip);
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_MODIFY, &*data);
-        }
-    }
-}
-
-impl<C> Drop for Tray<C> {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_DELETE, &*self.window.state().icon_data.borrow());
-        }
+        self.native.set_tooltip(tooltip);
     }
 }
 

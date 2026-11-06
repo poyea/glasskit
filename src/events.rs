@@ -66,19 +66,88 @@ pub(crate) trait Source<C> {
     fn take_command(&self) -> Option<C>;
 }
 
+/// What the loop gives, apart from a command.
+enum Ready {
+    Popup(PopupId),
+    Dialog(DialogId),
+    SessionUnlocked,
+    Deadline,
+}
+
+impl<C> From<Ready> for Event<C> {
+    fn from(ready: Ready) -> Self {
+        match ready {
+            Ready::Popup(id) => Event::Popup(id),
+            Ready::Dialog(id) => Event::Dialog(id),
+            Ready::SessionUnlocked => Event::SessionUnlocked,
+            Ready::Deadline => Event::Deadline,
+        }
+    }
+}
+
 /// The main loop of the thread. `C` is the command type of the trays.
 ///
 /// Make it with a [`Ui`], then give it to [`Tray::new`](crate::tray::Tray::new).
 pub struct EventLoop<C> {
-    ui: Ui,
-    timer: DeadlineTimer,
-    window: Window<Cell<bool>>,
+    waiter: Waiter,
     sources: Vec<Weak<dyn Source<C>>>,
 }
 
 impl<C> EventLoop<C> {
     /// A loop for the windows of this thread.
     pub fn new(ui: &Ui) -> Result<Self> {
+        Ok(Self {
+            waiter: Waiter::new(ui)?,
+            sources: Vec::new(),
+        })
+    }
+
+    /// The setup of the thread that the loop serves.
+    pub fn ui(&self) -> &Ui {
+        &self.waiter.ui
+    }
+
+    pub(crate) fn add_source(&mut self, source: Weak<dyn Source<C>>) {
+        self.sources.push(source);
+    }
+
+    /// Handle the window messages until there is something for the app. With `until`, it
+    /// also returns [`Event::Deadline`] at that clock time. The deadline stays exact after
+    /// sleep or a clock change. While it waits, the thread uses no CPU.
+    pub fn next(&mut self, until: Option<SystemTime>) -> Result<Event<C>> {
+        if until.is_none() {
+            self.waiter.timer.cancel();
+        }
+        loop {
+            if self.waiter.ui.pump_pending() {
+                return Ok(Event::Quit);
+            }
+            if let Some(command) = self.take_command() {
+                return Ok(Event::Command(command));
+            }
+            if let Some(ready) = self.waiter.poll(until)? {
+                return Ok(ready.into());
+            }
+        }
+    }
+
+    fn take_command(&mut self) -> Option<C> {
+        self.sources.retain(|s| s.strong_count() > 0);
+        self.sources
+            .iter()
+            .find_map(|s| s.upgrade().and_then(|s| s.take_command()))
+    }
+}
+
+/// The part of the loop that does not depend on the command type.
+struct Waiter {
+    ui: Ui,
+    timer: DeadlineTimer,
+    window: Window<Cell<bool>>,
+}
+
+impl Waiter {
+    fn new(ui: &Ui) -> Result<Self> {
         let timer = DeadlineTimer::new()?;
         let hinstance = ui.hinstance();
         window::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
@@ -91,63 +160,39 @@ impl<C> EventLoop<C> {
             ui: ui.clone(),
             timer,
             window,
-            sources: Vec::new(),
         })
     }
 
-    /// The setup of the thread that the loop serves.
-    pub fn ui(&self) -> &Ui {
-        &self.ui
-    }
-
-    pub(crate) fn add_source(&mut self, source: Weak<dyn Source<C>>) {
-        self.sources.push(source);
-    }
-
-    /// Handle the window messages until there is something for the app. With `until`, it
-    /// also returns [`Event::Deadline`] at that clock time. The deadline stays exact after
-    /// sleep or a clock change. While it waits, the thread uses no CPU.
-    pub fn next(&mut self, until: Option<SystemTime>) -> Result<Event<C>> {
-        if until.is_none() {
-            self.timer.cancel();
+    /// Give what is ready now. If nothing is, wait for a message or the deadline and give
+    /// `None`.
+    fn poll(&mut self, until: Option<SystemTime>) -> Result<Option<Ready>> {
+        match self.ui.take_notice() {
+            Some(Notice::Popup(id)) => return Ok(Some(Ready::Popup(PopupId(id)))),
+            Some(Notice::Dialog(id)) => return Ok(Some(Ready::Dialog(DialogId(id)))),
+            None => {}
         }
-        loop {
-            if self.ui.pump_pending() {
-                return Ok(Event::Quit);
-            }
-            self.sources.retain(|s| s.strong_count() > 0);
-            for source in &self.sources {
-                if let Some(command) = source.upgrade().and_then(|s| s.take_command()) {
-                    return Ok(Event::Command(command));
-                }
-            }
-            match self.ui.take_notice() {
-                Some(Notice::Popup(id)) => return Ok(Event::Popup(PopupId(id))),
-                Some(Notice::Dialog(id)) => return Ok(Event::Dialog(DialogId(id))),
-                None => {}
-            }
-            if self.window.state().replace(false) {
-                return Ok(Event::SessionUnlocked);
-            }
-            if let Some(t) = until {
-                if SystemTime::now() >= t {
-                    return Ok(Event::Deadline);
-                }
-                self.timer.set(t)?;
-            }
-            unsafe {
-                MsgWaitForMultipleObjectsEx(
-                    Some(&[self.timer.0]),
-                    INFINITE,
-                    QS_ALLINPUT,
-                    MWMO_INPUTAVAILABLE,
-                );
-            }
+        if self.window.state().replace(false) {
+            return Ok(Some(Ready::SessionUnlocked));
         }
+        if let Some(t) = until {
+            if SystemTime::now() >= t {
+                return Ok(Some(Ready::Deadline));
+            }
+            self.timer.set(t)?;
+        }
+        unsafe {
+            MsgWaitForMultipleObjectsEx(
+                Some(&[self.timer.0]),
+                INFINITE,
+                QS_ALLINPUT,
+                MWMO_INPUTAVAILABLE,
+            );
+        }
+        Ok(None)
     }
 }
 
-impl<C> Drop for EventLoop<C> {
+impl Drop for Waiter {
     fn drop(&mut self) {
         unsafe {
             let _ = WTSUnRegisterSessionNotification(self.window.hwnd());

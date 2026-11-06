@@ -106,6 +106,11 @@ impl<T> Window<T> {
     pub(crate) fn state(&self) -> &T {
         &self.state
     }
+
+    /// Another handle to the state. It keeps the state alive after the window ends.
+    pub(crate) fn share(&self) -> Rc<T> {
+        Rc::clone(&self.state)
+    }
 }
 
 impl<T> Drop for Window<T> {
