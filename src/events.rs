@@ -27,8 +27,8 @@ use windows::core::{PCWSTR, w};
 
 use crate::Ui;
 use crate::error::{Call, Result};
+use crate::native::{self, NativeWindow};
 use crate::ui::Notice;
-use crate::window::{self, Window};
 
 const CLASS_NAME: PCWSTR = w!("GlasskitEvents");
 /// Ticks of 100 ns from 1601-01-01 (FILETIME) to 1970-01-01 (Unix).
@@ -144,16 +144,16 @@ impl<C> EventLoop<C> {
 struct Waiter {
     ui: Ui,
     timer: DeadlineTimer,
-    window: Window<Cell<bool>>,
+    window: NativeWindow<Cell<bool>>,
 }
 
 impl Waiter {
     fn new(ui: &Ui) -> Result<Self> {
         let timer = DeadlineTimer::new()?;
         let hinstance = ui.hinstance();
-        window::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
-        let hwnd = window::create_hidden(CLASS_NAME, hinstance)?;
-        let window = Window::attach(hwnd, Rc::new(Cell::new(false)));
+        native::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
+        let hwnd = native::create_hidden(CLASS_NAME, hinstance)?;
+        let window = NativeWindow::attach(hwnd, Rc::new(Cell::new(false)));
         unsafe {
             let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
         }
@@ -203,7 +203,7 @@ impl Drop for Waiter {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
-        if let (WM_WTSSESSION_CHANGE, Some(unlocked)) = (msg, window::state_of::<Cell<bool>>(hwnd))
+        if let (WM_WTSSESSION_CHANGE, Some(unlocked)) = (msg, native::state_of::<Cell<bool>>(hwnd))
         {
             if wparam.0 == WTS_SESSION_UNLOCK as usize {
                 unlocked.set(true);

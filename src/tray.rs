@@ -34,7 +34,7 @@ use windows::core::{BOOL, HSTRING, PCSTR, PCWSTR, w};
 
 use crate::error::{Call, Error, Result};
 use crate::events::{EventLoop, Source};
-use crate::window::{self, Window};
+use crate::native::{self, NativeWindow};
 
 const CLASS_NAME: PCWSTR = w!("GlasskitTray");
 /// The numbers of the uxtheme.dll exports for dark menus. They have no names.
@@ -200,17 +200,17 @@ impl Drop for IconHandle {
 /// The icon, its window, and the state of the window procedure. None of it depends on the
 /// command type, so the compiler builds this code once.
 struct Native {
-    window: Window<Shared>,
+    window: NativeWindow<Shared>,
     _icon: IconHandle,
 }
 
 impl Native {
     fn new(hinstance: HINSTANCE, tooltip: &str, icon: &Icon) -> Result<Self> {
-        window::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
+        native::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
         let icon = IconHandle(create_icon(icon)?);
         // Use a hidden top-level window. A message-only window does not get the
         // TaskbarCreated message when Explorer restarts.
-        let hwnd = window::create_hidden(CLASS_NAME, hinstance)?;
+        let hwnd = native::create_hidden(CLASS_NAME, hinstance)?;
         let mut data = NOTIFYICONDATAW {
             cbSize: size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: hwnd,
@@ -229,7 +229,7 @@ impl Native {
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
         });
         let native = Self {
-            window: Window::attach(hwnd, shared),
+            window: NativeWindow::attach(hwnd, shared),
             _icon: icon,
         };
         allow_dark_menus(hwnd);
@@ -340,7 +340,7 @@ fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
-        let Some(shared) = window::state_of::<Shared>(hwnd) else {
+        let Some(shared) = native::state_of::<Shared>(hwnd) else {
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         };
         match msg {

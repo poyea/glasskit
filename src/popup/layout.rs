@@ -9,10 +9,10 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
 };
 
-use super::glass::{self, Graphics};
 use super::markup;
 use super::{PopupStyle, Prompt, Response};
 use crate::error::{Call, Result};
+use crate::render::{self, Graphics};
 
 const PADDING: f32 = 18.0;
 const TEXT_GAP: f32 = 14.0;
@@ -126,15 +126,15 @@ pub(super) fn build(
 
     let prompt_layout = gfx.text_layout(prompt, &fonts.prompt, inner)?;
     markup::apply(&prompt_layout, spans)?;
-    let mut y = pad + glass::layout_height(&prompt_layout)?.ceil() + s(TEXT_GAP);
+    let mut y = pad + render::layout_height(&prompt_layout)?.ceil() + s(TEXT_GAP);
     let image = content.image.map(|size| {
         let (w, h) = fit(size, scale, inner, s(IMAGE_MAX_HEIGHT));
-        let rect = glass::rect(pad + ((inner - w) / 2.0).round(), y, w, h);
+        let rect = render::rect(pad + ((inner - w) / 2.0).round(), y, w, h);
         y += h + s(TEXT_GAP);
         rect
     });
     let input = content.input.then(|| {
-        let rect = glass::rect(pad, y, inner, s(INPUT_HEIGHT));
+        let rect = render::rect(pad, y, inner, s(INPUT_HEIGHT));
         y += s(INPUT_HEIGHT) + s(TEXT_GAP);
         rect
     });
@@ -144,20 +144,20 @@ pub(super) fn build(
         let choice = choice.as_str();
         let text_w = inner - 2.0 * s(BUTTON_TEXT_PADDING);
         let label = gfx.text_layout(choice, &fonts.button, text_w)?;
-        let h = (glass::layout_height(&label)?.ceil() + 2.0 * s(BUTTON_TEXT_PADDING))
+        let h = (render::layout_height(&label)?.ceil() + 2.0 * s(BUTTON_TEXT_PADDING))
             .max(s(BUTTON_MIN_HEIGHT));
         buttons.push(Button {
-            rect: glass::rect(pad, y, inner, h),
+            rect: render::rect(pad, y, inner, h),
             label: choice.encode_utf16().collect(),
             response: Response::Choice(i),
         });
         y += h + s(BUTTON_GAP);
     }
     let dismiss_text = gfx.text_layout(dismiss, &fonts.button, inner)?;
-    let dismiss_w = (glass::layout_width(&dismiss_text)?.ceil() + 2.0 * s(DISMISS_TEXT_PADDING))
+    let dismiss_w = (render::layout_width(&dismiss_text)?.ceil() + 2.0 * s(DISMISS_TEXT_PADDING))
         .max(s(DISMISS_MIN_WIDTH));
     buttons.push(Button {
-        rect: glass::rect(width - pad - dismiss_w, y, dismiss_w, s(DISMISS_HEIGHT)),
+        rect: render::rect(width - pad - dismiss_w, y, dismiss_w, s(DISMISS_HEIGHT)),
         label: dismiss.encode_utf16().collect(),
         response: Response::Dismissed,
     });

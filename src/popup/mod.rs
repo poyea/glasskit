@@ -34,12 +34,13 @@ use windows::core::{BOOL, PCWSTR, w};
 use crate::Ui;
 use crate::error::{Call, Error, Result};
 use crate::events::PopupId;
+use crate::native::{self, NativeWindow};
 use crate::placement::{self, Area, Placement, Rect, SCREEN_MARGIN};
+use crate::render::Graphics;
 use crate::theme::Theme;
 use crate::ui::PopupSlot;
-use crate::window::{self, Window};
 use countdown::{label, whole_seconds};
-use glass::{Graphics, Scene};
+use glass::Scene;
 pub use image::Image;
 pub use prompt::{Mark, PopupStyle, Prompt};
 use state::{WindowState, wndproc};
@@ -93,7 +94,7 @@ pub struct ChoicePopup {
 
 /// The window of a prompt that shows, and what it needs.
 struct Active {
-    window: Window<WindowState>,
+    window: NativeWindow<WindowState>,
     _slot: PopupSlot,
     /// The GPU resources. They go last, after the window and its scene.
     _gfx: Graphics,
@@ -112,7 +113,7 @@ impl ChoicePopup {
 
     /// A popup that shows at `placement` in the work area.
     pub fn new(ui: &Ui, placement: Placement) -> Result<Self> {
-        window::register_class(CLASS_NAME, Some(wndproc), ui.hinstance(), IDC_ARROW)?;
+        native::register_class(CLASS_NAME, Some(wndproc), ui.hinstance(), IDC_ARROW)?;
         Ok(Self {
             ui: ui.clone(),
             id: PopupId(ui.new_id()),
@@ -173,12 +174,12 @@ impl ChoicePopup {
         ) {
             Ok(scene) => scene,
             Err(err) => {
-                window::destroy(hwnd);
+                native::destroy(hwnd);
                 return Err(err);
             }
         };
         let state = WindowState::new(self.id.0, self.style, layout, scene, theme, fonts, request);
-        let handle = Window::attach(hwnd, Rc::new(state));
+        let handle = NativeWindow::attach(hwnd, Rc::new(state));
         handle.state().open(hwnd)?;
         self.active = Some(Active {
             window: handle,

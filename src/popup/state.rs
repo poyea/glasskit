@@ -30,14 +30,15 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_numerics::Vector2;
 
 use super::countdown::{self, Countdown};
-use super::glass::{self, Scene};
+use super::glass::Scene;
 use super::input::{Frame, TextBox, clipboard_text};
 use super::layout::{Fonts, Layout};
 use super::{Image, Mark, PopupStyle, Prompt, Reply, Response};
 use crate::error::{Call, Result};
+use crate::native::state_of;
+use crate::render;
 use crate::theme::Theme;
 use crate::ui::Notice;
-use crate::window::state_of;
 
 /// The window closes this long after the fade-out, so the last frame shows.
 const FADE_OUT_EXTRA: Duration = Duration::from_millis(50);
@@ -348,7 +349,7 @@ impl WindowState {
         self.scene.draw(|dc: &ID2D1DeviceContext| unsafe {
             dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
             let frame = D2D1_ROUNDED_RECT {
-                rect: glass::rect(0.5, 0.5, l.width - 1.0, l.height - 1.0),
+                rect: render::rect(0.5, 0.5, l.width - 1.0, l.height - 1.0),
                 radiusX: l.window_radius,
                 radiusY: l.window_radius,
             };

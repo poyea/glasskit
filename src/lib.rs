@@ -104,14 +104,15 @@ pub mod dialog;
 pub mod error;
 pub mod events;
 pub mod layout;
+mod native;
 pub mod placement;
 pub mod popup;
 pub mod presence;
 pub mod process;
+mod render;
 mod theme;
 pub mod tray;
 mod ui;
-mod window;
 
 /// Runs the README example as a doc test.
 #[cfg(doctest)]

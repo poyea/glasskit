@@ -72,10 +72,10 @@ use windows_numerics::Vector2;
 
 use crate::Ui;
 use crate::events::DialogId;
+use crate::native::{self, NativeWindow, state_of};
 use crate::placement::{Area, Placement, SCREEN_MARGIN};
 use crate::theme::{Theme, colorref, over, rgba};
 use crate::ui::Notice;
-use crate::window::{self, Window, state_of};
 
 mod paint;
 mod picker;
@@ -251,7 +251,7 @@ pub struct Dialog {
     id: DialogId,
     shown: bool,
     /// Declared before the fonts, so the window is gone before its fonts.
-    window: Window<Shared>,
+    window: NativeWindow<Shared>,
     font: Font,
     heading_font: Font,
     scale: f32,
@@ -275,8 +275,8 @@ impl Dialog {
     pub fn new(ui: &Ui, title: &str, width: i32, height: i32) -> Result<Self> {
         let hinstance = ui.hinstance();
         unsafe {
-            window::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
-            window::register_class(
+            native::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
+            native::register_class(
                 PLACEMENT_CLASS,
                 Some(placement_proc),
                 hinstance,
@@ -324,7 +324,7 @@ impl Dialog {
             set_dwm_attribute(hwnd, DWMWA_TEXT_COLOR, look.text().0);
 
             let id = ui.new_id();
-            let window = Window::attach(
+            let window = NativeWindow::attach(
                 hwnd,
                 Rc::new(Shared {
                     kinds: RefCell::new(Vec::new()),

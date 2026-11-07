@@ -69,7 +69,7 @@ pub(crate) fn destroy(hwnd: HWND) {
     }
 }
 
-/// The state that [`Window::attach`] gave to `hwnd`. It gives `None` if the window has no
+/// The state that [`NativeWindow::attach`] gave to `hwnd`. It gives `None` if the window has no
 /// state yet.
 ///
 /// # Safety
@@ -84,12 +84,12 @@ pub(crate) unsafe fn state_of<'a, T>(hwnd: HWND) -> Option<&'a T> {
 ///
 /// The window holds one count of the state, so the state lives as long as the window.
 /// Dropping the value destroys the window, then releases the count.
-pub(crate) struct Window<T> {
+pub(crate) struct NativeWindow<T> {
     hwnd: HWND,
     state: Rc<T>,
 }
 
-impl<T> Window<T> {
+impl<T> NativeWindow<T> {
     /// Make `state` the state of `hwnd`.
     pub(crate) fn attach(hwnd: HWND, state: Rc<T>) -> Self {
         let count = Rc::into_raw(Rc::clone(&state));
@@ -113,7 +113,7 @@ impl<T> Window<T> {
     }
 }
 
-impl<T> Drop for Window<T> {
+impl<T> Drop for NativeWindow<T> {
     fn drop(&mut self) {
         destroy(self.hwnd);
         // The window is gone, so no message reads the state now. Release its count.
