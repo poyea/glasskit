@@ -28,6 +28,7 @@ public static class GlassUi {
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }
 '@
@@ -106,6 +107,13 @@ function Save-Picture([IntPtr] $Hwnd, [string] $Name, [switch] $FromScreen, $Rec
     }
 }
 
+# Put a window above all others, such as the console of the app, before a picture.
+function Set-OnTop([IntPtr] $Hwnd) {
+    # HWND_TOPMOST, and SWP_NOSIZE | SWP_NOACTIVATE. The window keeps its place.
+    [GlassUi]::SetWindowPos($Hwnd, [IntPtr] -1, 40, 40, 0, 0, 0x0011) | Out-Null
+    Start-Sleep -Milliseconds 300
+}
+
 function Stop-App($Process) {
     if (-not $Process.HasExited) { $Process.Kill() }
     $Process.WaitForExit(5000) | Out-Null
@@ -179,6 +187,7 @@ foreach ($material in @('mica', 'glass', 'solid')) {
         try {
             $hwnd = Find-Window $p 'GlasskitWindow'
             Start-Sleep -Milliseconds 800
+            Set-OnTop $hwnd
             Save-Picture $hwnd "window-$material" -FromScreen
         } finally {
             Stop-App $p
@@ -195,7 +204,7 @@ Step 'window keyboard' {
         Start-Sleep -Milliseconds 500
         $key = { param($vk) [GlassUi]::PostMessageW($hwnd, 0x0100, [IntPtr] $vk, [IntPtr]::Zero) | Out-Null }
         & $key 0x09
-        Start-Sleep -Milliseconds 300
+        Set-OnTop $hwnd
         Save-Picture $hwnd 'window-focus' -FromScreen
         & $key 0x0D
         & $key 0x09
