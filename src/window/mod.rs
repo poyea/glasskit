@@ -150,6 +150,8 @@ struct State {
     now: Cell<Interaction>,
     tracking: Cell<bool>,
     redraw_posted: Cell<bool>,
+    /// The theme and material that the background shows now.
+    applied: Cell<Option<(Theme, Material)>>,
     /// The GPU devices. They go last, after the scene.
     _gfx: Graphics,
 }
@@ -212,6 +214,7 @@ impl Window {
             now: Cell::new(Interaction::default()),
             tracking: Cell::new(false),
             redraw_posted: Cell::new(false),
+            applied: Cell::new(None),
             _gfx: gfx,
         };
         let native = NativeWindow::attach(hwnd, Rc::new(state));
@@ -336,8 +339,9 @@ impl Window {
     /// window shows a solid color until they change.
     pub fn set_material(&self, material: Material) {
         self.state().material.set(material);
-        self.state().apply_theme(self.hwnd());
-        self.state().render();
+        if self.state().apply_theme(self.hwnd()) {
+            self.state().render();
+        }
     }
 
     /// The background that the app asked for.
@@ -404,8 +408,14 @@ impl State {
     }
 
     /// Read the theme again, and show the background that fits it.
-    fn apply_theme(&self, hwnd: HWND) {
+    /// It gives false, and does nothing, when the theme and the material are as before.
+    fn apply_theme(&self, hwnd: HWND) -> bool {
         let theme = Theme::current();
+        let wanted = Some((theme, self.material.get()));
+        if self.applied.get() == wanted {
+            return false;
+        }
+        self.applied.set(wanted);
         self.theme.set(theme);
         set_dwm(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, u32::from(theme.dark));
         let mut backdrop = match self.material.get() {
@@ -433,6 +443,7 @@ impl State {
             let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
         }
         let _ = self.scene.set_backdrop(backdrop, &theme);
+        true
     }
 
     fn set_interaction(&self, hwnd: HWND, change: impl FnOnce(&mut Interaction)) {
@@ -585,8 +596,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             | WM_THEMECHANGED
             | WM_SYSCOLORCHANGE
             | WM_DWMCOLORIZATIONCOLORCHANGED => {
-                state.apply_theme(hwnd);
-                state.render();
+                // Windows sends these for many settings. Most of them do not change the look.
+                if state.apply_theme(hwnd) {
+                    state.render();
+                }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_MOUSEMOVE => {
