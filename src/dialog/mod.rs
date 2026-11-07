@@ -77,79 +77,93 @@ use crate::theme::{Theme, colorref, over, rgba};
 use crate::ui::Notice;
 use crate::window::{self, Window, state_of};
 
+mod paint;
+mod picker;
+mod types;
+
+use paint::*;
+use picker::*;
+pub use types::*;
+
 const CLASS_NAME: PCWSTR = w!("GlasskitDialog");
+
 const PLACEMENT_CLASS: PCWSTR = w!("GlasskitPlacement");
+
 const FIRST_ID: usize = 100;
+
 const ID_OK: usize = 1;
+
 const ID_CANCEL: usize = 2;
+
 const SS_CENTERIMAGE: u32 = 0x200;
+
 const BN_CLICKED: u32 = 0;
+
 const SELCHANGE: u32 = 1;
+
 const EN_CHANGE: u32 = 0x300;
+
 /// The extra height of a closed drop-down list that holds its open list.
 const DROP_DOWN_LIST_HEIGHT: i32 = 200;
+
 const FONT_SIZE: f32 = 14.0;
+
 const BUTTON_RADIUS: f32 = 6.0;
+
 const CARD_RADIUS: f32 = 8.0;
+
 const CHECK_BOX: f32 = 18.0;
+
 const CHECK_RADIUS: f32 = 4.0;
+
 const CHECK_GAP: f32 = 8.0;
+
 const HEADING_INSET: i32 = 12;
+
 const HEADING_TOP: i32 = 8;
+
 const HEADING_HEIGHT: i32 = 20;
+
 const FIELD_RADIUS: f32 = 4.0;
+
 const FIELD_INSET_X: i32 = 8;
+
 const FIELD_INSET_Y: i32 = 5;
+
 const FIELD_LINE_HEIGHT: i32 = 20;
+
 const LIST_INSET: i32 = 4;
+
 const ITEM_HEIGHT: i32 = 24;
+
 const ITEM_RADIUS: f32 = 4.0;
+
 const ITEM_TEXT_INSET: f32 = 8.0;
+
 const CHEVRON_WIDTH: f32 = 28.0;
+
 /// The height of a closed drop-down at 100% display scale.
 const DROP_DOWN_HEIGHT: i32 = 26;
+
 /// Notification codes of edit boxes, lists, and drop-downs that change how a field looks.
 const EN_SETFOCUS: u32 = 0x100;
+
 const EN_KILLFOCUS: u32 = 0x200;
+
 const LBN_SETFOCUS: u32 = 4;
+
 const LBN_KILLFOCUS: u32 = 5;
+
 const CBN_SETFOCUS: u32 = 3;
+
 const CBN_KILLFOCUS: u32 = 4;
+
 const CBN_DROPDOWN: u32 = 7;
+
 const CBN_CLOSEUP: u32 = 8;
-const PICKER_LABEL_HEIGHT: f32 = 20.0;
-const PICKER_SCREEN_RADIUS: f32 = 6.0;
-const PICKER_WINDOW_RADIUS: f32 = 3.0;
-/// A fraction this near to an edge or to the center snaps to it.
-const PICKER_SNAP: f32 = 0.04;
-const PICKER_KEY_STEP: f32 = 0.05;
+
 /// The faces to try, the first that Windows has is used. Segoe UI Variable is the popup font.
 const FONT_FACES: [PCWSTR; 2] = [w!("Segoe UI Variable Text"), w!("Segoe UI")];
-
-/// A position and size in pixels at 100% display scale. The dialog scales them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Bounds {
-    /// The left edge, from the left of the client area.
-    pub x: i32,
-    /// The top edge, from the top of the client area.
-    pub y: i32,
-    /// The width.
-    pub width: i32,
-    /// The height.
-    pub height: i32,
-}
-
-impl Bounds {
-    /// Bounds with this top-left corner and size.
-    pub const fn new(x: i32, y: i32, width: i32, height: i32) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 enum Control<'a> {
@@ -189,304 +203,6 @@ enum Kind {
 enum Surface {
     Window,
     Card,
-}
-
-/// The kinds of controls. They are the type parameter of [`Id`], and they decide which
-/// [`Dialog`] methods an id can go to.
-pub mod kind {
-    /// A text that the user cannot change.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Label {}
-    /// A card with a heading, behind the controls that are on it.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Group {}
-    /// A box for text, on one line or on many.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Edit {}
-    /// A closed list that opens when the user clicks it.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum DropDown {}
-    /// An open list of items.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum List {}
-    /// A check box with a text.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Check {}
-    /// A push button.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum Button {}
-    /// A picker for where a window shows on the screen. See [`Dialog::add_placement_picker`].
-    ///
-    /// [`Dialog::add_placement_picker`]: super::Dialog::add_placement_picker
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum PlacementPicker {}
-}
-
-mod sealed {
-    pub trait Sealed {}
-    impl Sealed for super::kind::Label {}
-    impl Sealed for super::kind::Edit {}
-    impl Sealed for super::kind::DropDown {}
-    impl Sealed for super::kind::List {}
-}
-
-/// The kinds of controls that show a text that the app can read and change.
-pub trait HasText: sealed::Sealed {}
-impl HasText for kind::Label {}
-impl HasText for kind::Edit {}
-
-/// The kinds of controls that hold a list of items, of which the user can select one.
-pub trait HasItems: sealed::Sealed {}
-impl HasItems for kind::DropDown {}
-impl HasItems for kind::List {}
-
-/// A control in a [`Dialog`]. The kind `K` decides which methods take it.
-pub struct Id<K> {
-    index: usize,
-    kind: PhantomData<fn() -> K>,
-}
-
-impl<K> Id<K> {
-    fn new(index: usize) -> Self {
-        Self {
-            index,
-            kind: PhantomData,
-        }
-    }
-}
-
-impl<K> Clone for Id<K> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<K> Copy for Id<K> {}
-
-impl<K> PartialEq for Id<K> {
-    fn eq(&self, other: &Self) -> bool {
-        self.index == other.index
-    }
-}
-
-impl<K> Eq for Id<K> {}
-
-impl<K> std::hash::Hash for Id<K> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.index.hash(state);
-    }
-}
-
-impl<K> fmt::Debug for Id<K> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Id({})", self.index)
-    }
-}
-
-/// A control of any kind, as an [`Event`] names it. Compare it with an [`Id`] of any kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AnyId(usize);
-
-impl<K> From<Id<K>> for AnyId {
-    fn from(id: Id<K>) -> Self {
-        AnyId(id.index)
-    }
-}
-
-impl<K> PartialEq<Id<K>> for AnyId {
-    fn eq(&self, other: &Id<K>) -> bool {
-        self.0 == other.index
-    }
-}
-
-impl<K> PartialEq<AnyId> for Id<K> {
-    fn eq(&self, other: &AnyId) -> bool {
-        self.index == other.0
-    }
-}
-
-/// How an edit box takes text.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct EditStyle {
-    /// The box has many lines. Enter starts a new line, and a scroll bar shows when the text
-    /// is longer than the box.
-    pub multiline: bool,
-    /// The box takes only the digits 0 to 9.
-    pub digits_only: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// What the user did. [`Dialog::run`] gives events to its handler one at a time.
-pub enum Event {
-    /// A button or a check box was clicked.
-    Clicked(AnyId),
-    /// The user changed the text of an edit box or the selection of a list.
-    /// Changes made through [`Dialog`] methods do not send this event.
-    Changed(AnyId),
-    /// The user pressed Enter outside a multiline edit box.
-    Submit,
-    /// The user pressed Esc or the close button.
-    Close,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// What the handler of [`Dialog::run`] wants next.
-pub enum Flow {
-    /// Keep the dialog open and wait for the next event.
-    Continue,
-    /// Close the dialog. [`Dialog::run`] then returns [`Outcome::Closed`].
-    Close,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// How [`Dialog::run`] ended.
-pub enum Outcome {
-    /// The handler returned [`Flow::Close`].
-    Closed,
-    /// The thread got WM_QUIT. The dialog posts WM_QUIT again for the caller.
-    Quit,
-}
-
-/// The colors, brushes, and drawing objects of one dialog.
-struct Look {
-    theme: Theme,
-    scale: f32,
-    window: D2D1_COLOR_F,
-    card: D2D1_COLOR_F,
-    field: D2D1_COLOR_F,
-    window_brush: HBRUSH,
-    card_brush: HBRUSH,
-    field_brush: HBRUSH,
-    painter: Option<Painter>,
-}
-
-impl Look {
-    fn new(theme: Theme, scale: f32) -> Self {
-        let window = theme.background();
-        let card = over(theme.button, window);
-        let field = over(theme.field, card);
-        let brush = |c| unsafe { CreateSolidBrush(colorref(c)) };
-        Self {
-            theme,
-            scale,
-            window,
-            card,
-            field,
-            window_brush: brush(window),
-            card_brush: brush(card),
-            field_brush: brush(field),
-            painter: Painter::new(scale).ok(),
-        }
-    }
-
-    fn surface(&self, surface: Surface) -> (D2D1_COLOR_F, HBRUSH) {
-        match surface {
-            Surface::Window => (self.window, self.window_brush),
-            Surface::Card => (self.card, self.card_brush),
-        }
-    }
-
-    fn text(&self) -> COLORREF {
-        colorref(over(self.theme.text, self.card))
-    }
-
-    fn dim_text(&self, behind: D2D1_COLOR_F) -> COLORREF {
-        let t = self.theme.text;
-        colorref(over(rgba(t.r, t.g, t.b, t.a * 0.45), behind))
-    }
-}
-
-impl Drop for Look {
-    fn drop(&mut self) {
-        unsafe {
-            for brush in [self.window_brush, self.card_brush, self.field_brush] {
-                let _ = DeleteObject(HGDIOBJ(brush.0));
-            }
-        }
-    }
-}
-
-/// Draws the cards and the owner-drawn buttons with Direct2D, so their edges are smooth.
-struct Painter {
-    target: ID2D1DCRenderTarget,
-    centered: IDWriteTextFormat,
-    leading: IDWriteTextFormat,
-    _factory: ID2D1Factory,
-}
-
-impl Painter {
-    fn new(scale: f32) -> windows::core::Result<Self> {
-        unsafe {
-            let factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let target = factory.CreateDCRenderTarget(&D2D1_RENDER_TARGET_PROPERTIES {
-                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_IGNORE,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                usage: D2D1_RENDER_TARGET_USAGE_NONE,
-                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
-            })?;
-            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let format = |alignment| -> windows::core::Result<IDWriteTextFormat> {
-                let format = dwrite.CreateTextFormat(
-                    FONT_FACES[0],
-                    None,
-                    DWRITE_FONT_WEIGHT_NORMAL,
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    FONT_SIZE * scale,
-                    w!(""),
-                )?;
-                format.SetTextAlignment(alignment)?;
-                format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-                // All drawn texts are one line. A long text ends with an ellipsis.
-                format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-                let ellipsis = dwrite.CreateEllipsisTrimmingSign(&format)?;
-                format.SetTrimming(
-                    &DWRITE_TRIMMING {
-                        granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-                        delimiter: 0,
-                        delimiterCount: 0,
-                    },
-                    &ellipsis,
-                )?;
-                Ok(format)
-            };
-            Ok(Self {
-                target,
-                centered: format(DWRITE_TEXT_ALIGNMENT_CENTER)?,
-                leading: format(DWRITE_TEXT_ALIGNMENT_LEADING)?,
-                _factory: factory,
-            })
-        }
-    }
-
-    fn paint(&self, hdc: HDC, rect: &RECT, draw: impl FnOnce(&ID2D1RenderTarget)) {
-        unsafe {
-            if self.target.BindDC(hdc, rect).is_err() {
-                return;
-            }
-            self.target.BeginDraw();
-            draw(&self.target);
-            let _ = self.target.EndDraw(None, None);
-        }
-    }
-}
-
-fn rounded(left: f32, top: f32, right: f32, bottom: f32, radius: f32) -> D2D1_ROUNDED_RECT {
-    D2D1_ROUNDED_RECT {
-        rect: D2D_RECT_F {
-            left,
-            top,
-            right,
-            bottom,
-        },
-        radiusX: radius,
-        radiusY: radius,
-    }
 }
 
 /// The window procedure only puts events in the queue. [`Dialog::run`] gives them to the handler
@@ -1202,445 +918,6 @@ fn has_face(font: HFONT, face: PCWSTR) -> bool {
     }
 }
 
-/// Hover colors for buttons and drop-downs, and a closed drop-down that looks like a button.
-extern "system" fn themed_control(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-    index: usize,
-    data: usize,
-) -> LRESULT {
-    unsafe {
-        let shared = &*(data as *const Shared);
-        let drop_down = shared.kinds.borrow().get(index) == Some(&Kind::DropDown);
-        match msg {
-            WM_MOUSEMOVE if shared.hover.get() != Some(index) => {
-                shared.hover.set(Some(index));
-                let mut tme = TRACKMOUSEEVENT {
-                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: hwnd,
-                    dwHoverTime: 0,
-                };
-                let _ = TrackMouseEvent(&mut tme);
-                let _ = InvalidateRect(Some(hwnd), None, false);
-            }
-            WM_MOUSELEAVE if shared.hover.get() == Some(index) => {
-                shared.hover.set(None);
-                let _ = InvalidateRect(Some(hwnd), None, false);
-            }
-            WM_ERASEBKGND if drop_down => return LRESULT(1),
-            WM_PAINT if drop_down => {
-                let mut ps = PAINTSTRUCT::default();
-                let hdc = BeginPaint(hwnd, &mut ps);
-                paint_drop_down(shared, index, hwnd, hdc);
-                let _ = EndPaint(hwnd, &ps);
-                return LRESULT(0);
-            }
-            WM_SETFOCUS | WM_KILLFOCUS | WM_ENABLE if drop_down => {
-                let result = DefSubclassProc(hwnd, msg, wparam, lparam);
-                let _ = InvalidateRect(Some(hwnd), None, false);
-                return result;
-            }
-            WM_NCDESTROY => {
-                let _ = RemoveWindowSubclass(hwnd, Some(themed_control), index);
-            }
-            _ => {}
-        }
-        DefSubclassProc(hwnd, msg, wparam, lparam)
-    }
-}
-
-fn faded(c: D2D1_COLOR_F, factor: f32) -> D2D1_COLOR_F {
-    rgba(c.r, c.g, c.b, c.a * factor)
-}
-
-/// The text of a control, or of one item of a list or a drop-down.
-fn text_of(hwnd: HWND, item: Option<(u32, u32, usize)>) -> Vec<u16> {
-    unsafe {
-        match item {
-            None => {
-                let len = GetWindowTextLengthW(hwnd).max(0) as usize;
-                let mut buf = vec![0u16; len + 1];
-                let copied = GetWindowTextW(hwnd, &mut buf).max(0) as usize;
-                buf.truncate(copied);
-                buf
-            }
-            Some((get_len, get_text, index)) => {
-                let len = SendMessageW(hwnd, get_len, Some(WPARAM(index)), None).0;
-                let Ok(len) = usize::try_from(len) else {
-                    return Vec::new();
-                };
-                let mut buf = vec![0u16; len + 1];
-                let copied = SendMessageW(
-                    hwnd,
-                    get_text,
-                    Some(WPARAM(index)),
-                    Some(LPARAM(buf.as_mut_ptr() as isize)),
-                )
-                .0;
-                buf.truncate(usize::try_from(copied).unwrap_or(0).min(len));
-                buf
-            }
-        }
-    }
-}
-
-fn paint_background(shared: &Shared, hwnd: HWND, hdc: HDC) {
-    let look = &shared.look;
-    unsafe {
-        let mut client = RECT::default();
-        let _ = GetClientRect(hwnd, &mut client);
-        FillRect(hdc, &client, look.window_brush);
-        let Some(painter) = &look.painter else {
-            return;
-        };
-        let focused = shared.index_of(GetFocus());
-        let cards = shared.cards.borrow();
-        let fields = shared.fields.borrow();
-        painter.paint(hdc, &client, |t| {
-            t.Clear(Some(&look.window));
-            let theme = &look.theme;
-            let (Ok(card), Ok(field), Ok(border), Ok(ring)) = (
-                t.CreateSolidColorBrush(&look.card, None),
-                t.CreateSolidColorBrush(&look.field, None),
-                t.CreateSolidColorBrush(&theme.button_border, None),
-                t.CreateSolidColorBrush(&faded(theme.text, 0.7), None),
-            ) else {
-                return;
-            };
-            let s = look.scale;
-            let shape = |c: &RECT, radius: f32| {
-                rounded(
-                    c.left as f32 + 0.5,
-                    c.top as f32 + 0.5,
-                    c.right as f32 - 0.5,
-                    c.bottom as f32 - 0.5,
-                    radius * s,
-                )
-            };
-            for c in cards.iter() {
-                let card_shape = shape(c, CARD_RADIUS);
-                t.FillRoundedRectangle(&card_shape, &card);
-                t.DrawRoundedRectangle(&card_shape, &border, 1.0, None);
-            }
-            for (i, f) in fields.iter().enumerate() {
-                let Some(f) = f else {
-                    continue;
-                };
-                let field_shape = shape(f, FIELD_RADIUS);
-                t.FillRoundedRectangle(&field_shape, &field);
-                if focused == Some(i) {
-                    t.DrawRoundedRectangle(&field_shape, &ring, 1.5 * s, None);
-                } else {
-                    t.DrawRoundedRectangle(&field_shape, &border, 1.0, None);
-                }
-            }
-        });
-    }
-}
-
-/// Draw a closed drop-down like a popup button, with the selected text and a chevron.
-fn paint_drop_down(shared: &Shared, index: usize, hwnd: HWND, hdc: HDC) {
-    let look = &shared.look;
-    let Some(painter) = &look.painter else {
-        return;
-    };
-    let theme = &look.theme;
-    let (surface, _) = look.surface(shared.surfaces.borrow()[index]);
-    unsafe {
-        let mut client = RECT::default();
-        let _ = GetClientRect(hwnd, &mut client);
-        let dropped = SendMessageW(hwnd, CB_GETDROPPEDSTATE, None, None).0 != 0;
-        let enabled = IsWindowEnabled(hwnd).as_bool();
-        let focused = GetFocus() == hwnd;
-        let hovered = shared.hover.get() == Some(index) && enabled;
-        let selected = SendMessageW(hwnd, CB_GETCURSEL, None, None).0;
-        let label = usize::try_from(selected)
-            .map(|i| text_of(hwnd, Some((CB_GETLBTEXTLEN, CB_GETLBTEXT, i))))
-            .unwrap_or_default();
-        let fill_color = if dropped {
-            theme.button_pressed
-        } else if hovered {
-            theme.button_hover
-        } else {
-            theme.button
-        };
-        let text_color = if enabled {
-            theme.text
-        } else {
-            faded(theme.text, 0.45)
-        };
-        let s = look.scale;
-        let (w, h) = (
-            (client.right - client.left) as f32,
-            (client.bottom - client.top) as f32,
-        );
-        painter.paint(hdc, &client, |t| {
-            t.Clear(Some(&surface));
-            let (Ok(fill), Ok(border), Ok(ring), Ok(text)) = (
-                t.CreateSolidColorBrush(&fill_color, None),
-                t.CreateSolidColorBrush(&theme.button_border, None),
-                t.CreateSolidColorBrush(&faded(theme.text, 0.7), None),
-                t.CreateSolidColorBrush(&text_color, None),
-            ) else {
-                return;
-            };
-            let shape = rounded(0.5, 0.5, w - 0.5, h - 0.5, BUTTON_RADIUS * s);
-            t.FillRoundedRectangle(&shape, &fill);
-            if focused {
-                t.DrawRoundedRectangle(&shape, &ring, 1.5 * s, None);
-            } else {
-                t.DrawRoundedRectangle(&shape, &border, 1.0, None);
-            }
-            let area = D2D_RECT_F {
-                left: ITEM_TEXT_INSET * s,
-                top: 0.0,
-                right: (w - CHEVRON_WIDTH * s).max(0.0),
-                bottom: h,
-            };
-            t.DrawText(
-                &label,
-                &painter.leading,
-                &area,
-                &text,
-                D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                DWRITE_MEASURING_MODE_NATURAL,
-            );
-            let (cx, cy) = (w - CHEVRON_WIDTH * s / 2.0, h / 2.0);
-            let (dx, dy) = (4.0 * s, 2.0 * s);
-            let point = |x: f32, y: f32| Vector2 { X: x, Y: y };
-            t.DrawLine(
-                point(cx - dx, cy - dy),
-                point(cx, cy + dy),
-                &text,
-                1.2 * s,
-                None,
-            );
-            t.DrawLine(
-                point(cx, cy + dy),
-                point(cx + dx, cy - dy),
-                &text,
-                1.2 * s,
-                None,
-            );
-        });
-    }
-}
-
-/// Draw one item of a list or of an open drop-down, with a rounded highlight when selected.
-fn paint_item(shared: &Shared, item: &DRAWITEMSTRUCT) {
-    let Some(index) = shared.index_of(item.hwndItem) else {
-        return;
-    };
-    if item.itemState.0 & ODS_COMBOBOXEDIT.0 != 0 {
-        paint_drop_down(shared, index, item.hwndItem, item.hDC);
-        return;
-    }
-    let look = &shared.look;
-    let Some(painter) = &look.painter else {
-        return;
-    };
-    let theme = &look.theme;
-    let messages = if item.CtlType == ODT_COMBOBOX {
-        (CB_GETLBTEXTLEN, CB_GETLBTEXT)
-    } else {
-        (LB_GETTEXTLEN, LB_GETTEXT)
-    };
-    let label = match item.itemID {
-        u32::MAX => Vec::new(),
-        id => text_of(item.hwndItem, Some((messages.0, messages.1, id as usize))),
-    };
-    let selected = item.itemState.0 & ODS_SELECTED.0 != 0 && item.itemID != u32::MAX;
-    let rect = item.rcItem;
-    let (w, h) = (
-        (rect.right - rect.left) as f32,
-        (rect.bottom - rect.top) as f32,
-    );
-    let s = look.scale;
-    painter.paint(item.hDC, &rect, |t| unsafe {
-        t.Clear(Some(&look.field));
-        let (Ok(highlight), Ok(text)) = (
-            t.CreateSolidColorBrush(&theme.button_hover, None),
-            t.CreateSolidColorBrush(&theme.text, None),
-        ) else {
-            return;
-        };
-        if selected {
-            let shape = rounded(2.0, 1.0, w - 2.0, h - 1.0, ITEM_RADIUS * s);
-            t.FillRoundedRectangle(&shape, &highlight);
-        }
-        let area = D2D_RECT_F {
-            left: ITEM_TEXT_INSET * s,
-            top: 0.0,
-            right: w - 2.0,
-            bottom: h,
-        };
-        t.DrawText(
-            &label,
-            &painter.leading,
-            &area,
-            &text,
-            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
-    });
-}
-
-/// Draw a button like a popup button, or a check box in the same style.
-fn paint_control(shared: &Shared, item: &DRAWITEMSTRUCT) {
-    let look = &shared.look;
-    let Some(painter) = &look.painter else {
-        return;
-    };
-    let Some(index) = shared.index_of(item.hwndItem) else {
-        return;
-    };
-    let kind = shared.kinds.borrow()[index];
-    let (surface, _) = look.surface(shared.surfaces.borrow()[index]);
-    let checked = shared.checked.borrow()[index];
-    let state = item.itemState;
-    let pressed = state.0 & ODS_SELECTED.0 != 0;
-    let disabled = state.0 & ODS_DISABLED.0 != 0;
-    let focused = state.0 & ODS_FOCUS.0 != 0 && state.0 & ODS_NOFOCUSRECT.0 == 0;
-    let hovered = shared.hover.get() == Some(index) && !disabled;
-    let theme = &look.theme;
-    let label = unsafe {
-        let len = GetWindowTextLengthW(item.hwndItem).max(0) as usize;
-        let mut buf = vec![0u16; len + 1];
-        let copied = GetWindowTextW(item.hwndItem, &mut buf).max(0) as usize;
-        buf.truncate(copied);
-        buf
-    };
-    let rect = item.rcItem;
-    let (w, h) = (
-        (rect.right - rect.left) as f32,
-        (rect.bottom - rect.top) as f32,
-    );
-    let s = look.scale;
-    let text_color = if disabled {
-        rgba(
-            theme.text.r,
-            theme.text.g,
-            theme.text.b,
-            theme.text.a * 0.45,
-        )
-    } else {
-        theme.text
-    };
-    let fill_color = if pressed {
-        theme.button_pressed
-    } else if hovered {
-        theme.button_hover
-    } else {
-        theme.button
-    };
-    painter.paint(item.hDC, &rect, |t| unsafe {
-        t.Clear(Some(&surface));
-        let (Ok(text), Ok(fill), Ok(border), Ok(ring), Ok(mark)) = (
-            t.CreateSolidColorBrush(&text_color, None),
-            t.CreateSolidColorBrush(&fill_color, None),
-            t.CreateSolidColorBrush(&theme.button_border, None),
-            t.CreateSolidColorBrush(&rgba(theme.text.r, theme.text.g, theme.text.b, 0.7), None),
-            t.CreateSolidColorBrush(&surface, None),
-        ) else {
-            return;
-        };
-        match kind {
-            Kind::Check => {
-                let size = CHECK_BOX * s;
-                let top = ((h - size) / 2.0).max(0.0);
-                let shape = rounded(1.5, top + 0.5, 1.5 + size, top + size, CHECK_RADIUS * s);
-                if checked {
-                    t.FillRoundedRectangle(&shape, &text);
-                    let at = |x: f32, y: f32| Vector2 {
-                        X: 1.5 + x * size,
-                        Y: top + y * size,
-                    };
-                    let width = 1.8 * s;
-                    t.DrawLine(at(0.24, 0.52), at(0.43, 0.71), &mark, width, None);
-                    t.DrawLine(at(0.43, 0.71), at(0.77, 0.31), &mark, width, None);
-                } else {
-                    t.FillRoundedRectangle(&shape, &fill);
-                    t.DrawRoundedRectangle(&shape, &ring, 1.0, None);
-                }
-                if focused {
-                    let outline = rounded(
-                        0.5,
-                        top - 0.5,
-                        size + 2.5,
-                        top + size + 1.0,
-                        CHECK_RADIUS * s,
-                    );
-                    t.DrawRoundedRectangle(&outline, &ring, 1.0, None);
-                }
-                let left = 1.5 + size + CHECK_GAP * s;
-                let area = D2D_RECT_F {
-                    left,
-                    top: 0.0,
-                    right: w,
-                    bottom: h,
-                };
-                t.DrawText(
-                    &label,
-                    &painter.leading,
-                    &area,
-                    &text,
-                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
-            }
-            _ => {
-                let shape = rounded(0.5, 0.5, w - 0.5, h - 0.5, BUTTON_RADIUS * s);
-                t.FillRoundedRectangle(&shape, &fill);
-                if focused {
-                    t.DrawRoundedRectangle(&shape, &ring, 1.5 * s, None);
-                } else {
-                    t.DrawRoundedRectangle(&shape, &border, 1.0, None);
-                }
-                let area = D2D_RECT_F {
-                    left: 0.0,
-                    top: 0.0,
-                    right: w,
-                    bottom: h,
-                };
-                t.DrawText(
-                    &label,
-                    &painter.centered,
-                    &area,
-                    &text,
-                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
-            }
-        }
-    });
-}
-
-/// Give a static text, an edit box, or a list the dialog colors.
-fn control_colors(shared: &Shared, msg: u32, hdc: HDC, child: HWND) -> LRESULT {
-    let look = &shared.look;
-    let index = shared.index_of(child);
-    let kind = index.map(|i| shared.kinds.borrow()[i]);
-    let (back, brush, text) = match (msg, kind) {
-        (WM_CTLCOLORSTATIC, Some(Kind::Edit)) => {
-            (look.field, look.field_brush, look.dim_text(look.field))
-        }
-        (WM_CTLCOLORSTATIC, _) => {
-            let surface = index.map_or(Surface::Window, |i| shared.surfaces.borrow()[i]);
-            let (back, brush) = look.surface(surface);
-            (back, brush, look.text())
-        }
-        _ => (look.field, look.field_brush, look.text()),
-    };
-    unsafe {
-        SetTextColor(hdc, text);
-        SetBkColor(hdc, colorref(back));
-    }
-    LRESULT(brush.0 as isize)
-}
-
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         let Some(shared) = state_of::<Shared>(hwnd) else {
@@ -1789,273 +1066,6 @@ fn work_area() -> RECT {
         };
     }
     work
-}
-
-/// Where the parts of a placement picker are, in its client pixels. The picker draws the work
-/// area at a smaller scale, with the window in it at the same scale.
-struct Picker {
-    screen: Area,
-    window_width: f32,
-    window_height: f32,
-    margin: f32,
-    work: RECT,
-}
-
-impl Picker {
-    fn new(shared: &Shared, index: usize, hwnd: HWND) -> Self {
-        let s = shared.look.scale;
-        let mut client = RECT::default();
-        unsafe {
-            let _ = GetClientRect(hwnd, &mut client);
-        }
-        let work = work_area();
-        let (work_w, work_h) = (
-            (work.right - work.left) as f32,
-            (work.bottom - work.top) as f32,
-        );
-        let room_w = (client.right as f32 - 2.0).max(1.0);
-        let room_h = (client.bottom as f32 - PICKER_LABEL_HEIGHT * s - 2.0).max(1.0);
-        let k = (room_w / work_w).min(room_h / work_h);
-        let (w, h) = (work_w * k, work_h * k);
-        let left = ((client.right as f32 - w) / 2.0).floor();
-        let (window_w, window_h) = shared.window_sizes.borrow()[index];
-        Self {
-            screen: Area {
-                left,
-                top: 1.0,
-                right: left + w,
-                bottom: 1.0 + h,
-            },
-            window_width: window_w as f32 * s * k,
-            window_height: window_h as f32 * s * k,
-            margin: SCREEN_MARGIN * s * k,
-            work,
-        }
-    }
-
-    fn window(&self, placement: Placement) -> D2D_RECT_F {
-        let (left, top) = placement.place_exact(
-            self.screen,
-            self.window_width,
-            self.window_height,
-            self.margin,
-        );
-        D2D_RECT_F {
-            left,
-            top,
-            right: left + self.window_width,
-            bottom: top + self.window_height,
-        }
-    }
-
-    /// The placement that puts the top-left corner of the window at `corner`, snapped.
-    fn placement_at(&self, corner: (f32, f32)) -> Placement {
-        let p = Placement::at_exact(
-            self.screen,
-            self.window_width,
-            self.window_height,
-            self.margin,
-            corner,
-        );
-        Placement::new(snap(p.x()), snap(p.y()))
-    }
-}
-
-/// Move a fraction to an edge or to the center when it is near, so the named places are easy
-/// to get exactly.
-fn snap(fraction: f32) -> f32 {
-    [0.0, 0.5, 1.0]
-        .into_iter()
-        .find(|target| (fraction - target).abs() < PICKER_SNAP)
-        .unwrap_or(fraction)
-}
-
-fn paint_placement(shared: &Shared, index: usize, hwnd: HWND, hdc: HDC) {
-    let look = &shared.look;
-    let Some(painter) = &look.painter else {
-        return;
-    };
-    let theme = &look.theme;
-    let s = look.scale;
-    let picker = Picker::new(shared, index, hwnd);
-    let window = picker.window(shared.placements.borrow()[index]);
-    let (surface, _) = look.surface(shared.surfaces.borrow()[index]);
-    let focused = unsafe { GetFocus() } == hwnd;
-    let size: Vec<u16> = format!(
-        "{} \u{d7} {}",
-        picker.work.right - picker.work.left,
-        picker.work.bottom - picker.work.top
-    )
-    .encode_utf16()
-    .collect();
-    let mut client = RECT::default();
-    unsafe {
-        let _ = GetClientRect(hwnd, &mut client);
-    }
-    painter.paint(hdc, &client, |t| unsafe {
-        t.Clear(Some(&surface));
-        let (Ok(screen_fill), Ok(border), Ok(ring), Ok(window_fill), Ok(lines), Ok(label)) = (
-            t.CreateSolidColorBrush(&look.field, None),
-            t.CreateSolidColorBrush(&theme.button_border, None),
-            t.CreateSolidColorBrush(&faded(theme.text, 0.7), None),
-            t.CreateSolidColorBrush(&faded(theme.text, 0.85), None),
-            t.CreateSolidColorBrush(&look.field, None),
-            t.CreateSolidColorBrush(&faded(theme.text, 0.6), None),
-        ) else {
-            return;
-        };
-        let a = picker.screen;
-        let screen = rounded(
-            a.left + 0.5,
-            a.top + 0.5,
-            a.right - 0.5,
-            a.bottom - 0.5,
-            PICKER_SCREEN_RADIUS * s,
-        );
-        t.FillRoundedRectangle(&screen, &screen_fill);
-        if focused {
-            t.DrawRoundedRectangle(&screen, &ring, 1.5 * s, None);
-        } else {
-            t.DrawRoundedRectangle(&screen, &border, 1.0, None);
-        }
-        let shape = rounded(
-            window.left,
-            window.top,
-            window.right,
-            window.bottom,
-            PICKER_WINDOW_RADIUS * s,
-        );
-        t.FillRoundedRectangle(&shape, &window_fill);
-        // Lines like the question text and the choices, so the box looks like the popup.
-        let (w, h) = (window.right - window.left, window.bottom - window.top);
-        let stroke = (h * 0.05).max(1.0);
-        for (y, length) in [(0.18, 0.62), (0.40, 0.76), (0.56, 0.76), (0.72, 0.76)] {
-            let from = Vector2 {
-                X: window.left + w * 0.12,
-                Y: window.top + h * y,
-            };
-            let to = Vector2 {
-                X: window.left + w * (0.12 + length),
-                Y: window.top + h * y,
-            };
-            t.DrawLine(from, to, &lines, stroke, None);
-        }
-        let area = D2D_RECT_F {
-            left: 0.0,
-            top: a.bottom + 2.0,
-            right: client.right as f32,
-            bottom: client.bottom as f32,
-        };
-        t.DrawText(
-            &size,
-            &painter.centered,
-            &area,
-            &label,
-            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-            DWRITE_MEASURING_MODE_NATURAL,
-        );
-    });
-}
-
-/// Store a placement that the user made, repaint, and tell the app.
-fn user_placement(shared: &Shared, index: usize, hwnd: HWND, placement: Placement) {
-    {
-        let mut placements = shared.placements.borrow_mut();
-        if placements[index] == placement {
-            return;
-        }
-        placements[index] = placement;
-    }
-    unsafe {
-        let _ = InvalidateRect(Some(hwnd), None, false);
-    }
-    if !shared.muted.get() {
-        shared.push(Event::Changed(AnyId(index)));
-    }
-}
-
-extern "system" fn placement_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    unsafe {
-        let parent = GetParent(hwnd).unwrap_or_default();
-        let Some(shared) = state_of::<Shared>(parent) else {
-            return DefWindowProcW(hwnd, msg, wparam, lparam);
-        };
-        let Some(index) = shared.index_of(hwnd) else {
-            return DefWindowProcW(hwnd, msg, wparam, lparam);
-        };
-        let point = || {
-            (
-                (lparam.0 & 0xFFFF) as i16 as f32,
-                ((lparam.0 >> 16) & 0xFFFF) as i16 as f32,
-            )
-        };
-        match msg {
-            WM_ERASEBKGND => LRESULT(1),
-            WM_PAINT => {
-                let mut ps = PAINTSTRUCT::default();
-                let hdc = BeginPaint(hwnd, &mut ps);
-                paint_placement(shared, index, hwnd, hdc);
-                let _ = EndPaint(hwnd, &ps);
-                LRESULT(0)
-            }
-            WM_GETDLGCODE => LRESULT(DLGC_WANTARROWS as isize),
-            WM_SETFOCUS | WM_KILLFOCUS => {
-                let _ = InvalidateRect(Some(hwnd), None, false);
-                LRESULT(0)
-            }
-            WM_LBUTTONDOWN => {
-                let _ = SetFocus(Some(hwnd));
-                SetCapture(hwnd);
-                let picker = Picker::new(shared, index, hwnd);
-                let window = picker.window(shared.placements.borrow()[index]);
-                let (x, y) = point();
-                let inside =
-                    x >= window.left && x < window.right && y >= window.top && y < window.bottom;
-                // Drag from the clicked point. A click outside the window moves its center there.
-                let grab = if inside {
-                    (x - window.left, y - window.top)
-                } else {
-                    (picker.window_width / 2.0, picker.window_height / 2.0)
-                };
-                shared.grab.set(Some(grab));
-                let placement = picker.placement_at((x - grab.0, y - grab.1));
-                user_placement(shared, index, hwnd, placement);
-                LRESULT(0)
-            }
-            WM_MOUSEMOVE => {
-                if let Some(grab) = shared.grab.get() {
-                    let (x, y) = point();
-                    let picker = Picker::new(shared, index, hwnd);
-                    let placement = picker.placement_at((x - grab.0, y - grab.1));
-                    user_placement(shared, index, hwnd, placement);
-                }
-                LRESULT(0)
-            }
-            WM_LBUTTONUP => {
-                shared.grab.set(None);
-                let _ = ReleaseCapture();
-                LRESULT(0)
-            }
-            WM_CAPTURECHANGED => {
-                shared.grab.set(None);
-                LRESULT(0)
-            }
-            WM_KEYDOWN => {
-                let (dx, dy) = match VIRTUAL_KEY(wparam.0 as u16) {
-                    VK_LEFT => (-PICKER_KEY_STEP, 0.0),
-                    VK_RIGHT => (PICKER_KEY_STEP, 0.0),
-                    VK_UP => (0.0, -PICKER_KEY_STEP),
-                    VK_DOWN => (0.0, PICKER_KEY_STEP),
-                    _ => return DefWindowProcW(hwnd, msg, wparam, lparam),
-                };
-                let p = shared.placements.borrow()[index];
-                let moved = Placement::new(snap(p.x() + dx), snap(p.y() + dy));
-                user_placement(shared, index, hwnd, moved);
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-        }
-    }
 }
 
 #[cfg(test)]
