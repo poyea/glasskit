@@ -168,13 +168,7 @@ pub(super) extern "system" fn themed_control(
         match msg {
             WM_MOUSEMOVE if shared.hover.get() != Some(index) => {
                 shared.hover.set(Some(index));
-                let mut tme = TRACKMOUSEEVENT {
-                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: hwnd,
-                    dwHoverTime: 0,
-                };
-                let _ = TrackMouseEvent(&mut tme);
+                native::track_leave(hwnd);
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             WM_MOUSELEAVE if shared.hover.get() == Some(index) => {

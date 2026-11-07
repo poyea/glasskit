@@ -214,10 +214,8 @@ pub(super) extern "system" fn placement_proc(
             return DefWindowProcW(hwnd, msg, wparam, lparam);
         };
         let point = || {
-            (
-                (lparam.0 & 0xFFFF) as i16 as f32,
-                ((lparam.0 >> 16) & 0xFFFF) as i16 as f32,
-            )
+            let (x, y) = native::point(lparam);
+            (x as f32, y as f32)
         };
         match msg {
             WM_ERASEBKGND => LRESULT(1),

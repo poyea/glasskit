@@ -18,9 +18,7 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, HWND_TOPMOST, IDC_HAND, KillTimer, LoadCursorW, MA_ACTIVATE, MA_NOACTIVATE,
     SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetTimer, SetWindowPos,
@@ -35,7 +33,7 @@ use super::input::{Frame, TextBox, clipboard_text};
 use super::layout::{Fonts, Layout};
 use super::{Image, Mark, PopupStyle, Prompt, Reply, Response};
 use crate::error::{Call, Result};
-use crate::native::state_of;
+use crate::native::{self, state_of};
 use crate::render;
 use crate::theme::Theme;
 use crate::ui::Notice;
@@ -331,8 +329,8 @@ impl WindowState {
     }
 
     fn hit(&self, lparam: LPARAM) -> Option<usize> {
-        let x = (lparam.0 & 0xFFFF) as i16 as f32;
-        let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+        let (x, y) = native::point(lparam);
+        let (x, y) = (x as f32, y as f32);
         self.layout.borrow().buttons.iter().position(|b| {
             x >= b.rect.left && x < b.rect.right && y >= b.rect.top && y < b.rect.bottom
         })
@@ -519,17 +517,9 @@ pub(super) extern "system" fn wndproc(
             }
             WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP if state.closing.get() => LRESULT(0),
             WM_MOUSEMOVE => {
-                if !state.pointer_inside.get() {
-                    let mut tme = TRACKMOUSEEVENT {
-                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE,
-                        hwndTrack: hwnd,
-                        dwHoverTime: 0,
-                    };
-                    if TrackMouseEvent(&mut tme).is_ok() {
-                        state.pointer_inside.set(true);
-                        state.pause_countdown(hwnd);
-                    }
+                if !state.pointer_inside.get() && native::track_leave(hwnd) {
+                    state.pointer_inside.set(true);
+                    state.pause_countdown(hwnd);
                 }
                 let hit = state.hit(lparam);
                 if hit != state.hover.get() {

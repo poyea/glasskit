@@ -1,14 +1,21 @@
 // Copyright (c) 2026 John Law
 // SPDX-License-Identifier: MIT
 
-//! Window classes, hidden windows, and windows that hold Rust state.
+//! Window classes, hidden windows, windows that hold Rust state, and small helpers for
+//! window messages that all windows use.
 
+use std::ffi::c_void;
 use std::rc::Rc;
 
-use windows::Win32::Foundation::{ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND};
+use windows::Win32::Foundation::{
+    ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM,
+};
+use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
+use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, IsWindow, LoadCursorW,
-    RegisterClassExW, SetWindowLongPtrW, WNDCLASSEXW, WNDPROC, WS_EX_TOOLWINDOW, WS_POPUP,
+    RegisterClassExW, SW_SHOWNORMAL, SetForegroundWindow, SetWindowLongPtrW, ShowWindow,
+    WNDCLASSEXW, WNDPROC, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 use windows::core::PCWSTR;
 
@@ -65,6 +72,71 @@ pub(crate) fn destroy(hwnd: HWND) {
     unsafe {
         if IsWindow(Some(hwnd)).as_bool() {
             let _ = DestroyWindow(hwnd);
+        }
+    }
+}
+
+/// Set a DWM attribute that takes a 32-bit value. It gives false when Windows does not take
+/// it, for example an attribute that is newer than the Windows version.
+pub(crate) fn set_dwm_attribute(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE, value: u32) -> bool {
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            attribute,
+            &value as *const u32 as *const c_void,
+            size_of::<u32>() as u32,
+        )
+        .is_ok()
+    }
+}
+
+/// Show a top-level window and bring it to the front.
+pub(crate) fn show_window(hwnd: HWND) {
+    unsafe {
+        // The first ShowWindow of a process can use the show state of the shortcut or the
+        // parent process, such as hidden. The second call uses the state that is wanted.
+        let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+        let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+/// The point of a mouse message, in client pixels.
+pub(crate) fn point(lparam: LPARAM) -> (i32, i32) {
+    let x = (lparam.0 & 0xFFFF) as i16 as i32;
+    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+    (x, y)
+}
+
+/// Ask for `WM_MOUSELEAVE` when the pointer leaves the window. It gives false on failure.
+pub(crate) fn track_leave(hwnd: HWND) -> bool {
+    let mut tme = TRACKMOUSEEVENT {
+        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
+    unsafe { TrackMouseEvent(&mut tme).is_ok() }
+}
+
+/// Destroys a window when a step of its creation fails. Call `disarm` when the window is
+/// complete.
+pub(crate) struct DestroyOnError(Option<HWND>);
+
+impl DestroyOnError {
+    pub(crate) fn new(hwnd: HWND) -> Self {
+        Self(Some(hwnd))
+    }
+
+    pub(crate) fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for DestroyOnError {
+    fn drop(&mut self) {
+        if let Some(hwnd) = self.0 {
+            destroy(hwnd);
         }
     }
 }

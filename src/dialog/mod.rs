@@ -29,8 +29,7 @@ use windows::Win32::Graphics::DirectWrite::{
     IDWriteFactory, IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dwm::{
-    DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWINDOWATTRIBUTE,
-    DwmSetWindowAttribute,
+    DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -45,8 +44,8 @@ use windows::Win32::UI::Controls::{
 };
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    EnableWindow, GetFocus, IsWindowEnabled, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE,
-    TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY, VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP,
+    EnableWindow, GetFocus, IsWindowEnabled, ReleaseCapture, SetCapture, SetFocus, VIRTUAL_KEY,
+    VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP,
 };
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -57,15 +56,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetDlgItem, GetParent, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, IDC_SIZEALL,
     LB_ADDSTRING, LB_DELETESTRING, LB_GETCURSEL, LB_GETTEXT, LB_GETTEXTLEN, LB_INSERTSTRING,
     LB_RESETCONTENT, LB_SETCURSEL, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY,
-    LBS_OWNERDRAWFIXED, MB_ICONWARNING, MB_OK, MessageBoxW, SPI_GETWORKAREA, SW_SHOWNORMAL,
-    SWP_NOSIZE, SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW,
-    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, SystemParametersInfoW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT,
-    WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ENABLE, WM_ERASEBKGND, WM_GETDLGCODE,
-    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM, WM_MOUSEMOVE,
-    WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW,
-    WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
-    WS_VSCROLL,
+    LBS_OWNERDRAWFIXED, MB_ICONWARNING, MB_OK, MessageBoxW, SPI_GETWORKAREA, SWP_NOSIZE,
+    SWP_NOZORDER, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SendMessageW, SetWindowPos, SetWindowTextW,
+    SystemParametersInfoW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CAPTURECHANGED, WM_CLOSE, WM_COMMAND,
+    WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX, WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ENABLE, WM_ERASEBKGND,
+    WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MEASUREITEM,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WS_CAPTION, WS_CHILD,
+    WS_EX_APPWINDOW, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU,
+    WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 use windows_numerics::Vector2;
@@ -315,13 +313,13 @@ impl Dialog {
             .call("CreateWindowExW(dialog)")?;
 
             let look = Look::new(theme, scale);
-            set_dwm_attribute(
+            native::set_dwm_attribute(
                 hwnd,
                 DWMWA_USE_IMMERSIVE_DARK_MODE,
                 i32::from(theme.dark) as u32,
             );
-            set_dwm_attribute(hwnd, DWMWA_CAPTION_COLOR, colorref(look.window).0);
-            set_dwm_attribute(hwnd, DWMWA_TEXT_COLOR, look.text().0);
+            native::set_dwm_attribute(hwnd, DWMWA_CAPTION_COLOR, colorref(look.window).0);
+            native::set_dwm_attribute(hwnd, DWMWA_TEXT_COLOR, look.text().0);
 
             let id = ui.new_id();
             let window = NativeWindow::attach(
@@ -803,13 +801,7 @@ impl Dialog {
         }
         self.shown = true;
         self.ui.add_dialog(self.window.hwnd());
-        unsafe {
-            // The first ShowWindow call of a process can use the show state of the parent,
-            // such as hidden. The second call uses the state that is wanted.
-            let _ = ShowWindow(self.window.hwnd(), SW_SHOWNORMAL);
-            let _ = ShowWindow(self.window.hwnd(), SW_SHOWNORMAL);
-            let _ = SetForegroundWindow(self.window.hwnd());
-        }
+        native::show_window(self.window.hwnd());
         if let Some(first) =
             (0..self.controls.len()).find(|&index| self.kind(index) != Kind::Static)
         {
@@ -855,17 +847,6 @@ fn contains(outer: &RECT, inner: &RECT) -> bool {
         && inner.top >= outer.top
         && inner.right <= outer.right
         && inner.bottom <= outer.bottom
-}
-
-fn set_dwm_attribute(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE, value: u32) {
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            attribute,
-            &value as *const u32 as *const c_void,
-            size_of::<u32>() as u32,
-        );
-    }
 }
 
 /// The popup font at 14 px, or Segoe UI if Windows has no other face.
@@ -956,8 +937,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             WM_LBUTTONDOWN => {
                 // A click on the padding of a field gives the focus to the control in it.
-                let x = (lparam.0 & 0xFFFF) as i16 as i32;
-                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let (x, y) = native::point(lparam);
                 let hit = shared.fields.borrow().iter().position(|f| {
                     f.is_some_and(|f| x >= f.left && x < f.right && y >= f.top && y < f.bottom)
                 });

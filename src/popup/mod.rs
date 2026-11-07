@@ -19,17 +19,17 @@ use std::ffi::c_void;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use windows::Win32::Foundation::{HINSTANCE, HWND, RECT, TRUE};
+use windows::Win32::Foundation::{HINSTANCE, HWND, RECT};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_USE_HOSTBACKDROPBRUSH, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DWMWCP_DONOTROUND, DWMWINDOWATTRIBUTE, DwmSetWindowAttribute,
+    DWMWCP_DONOTROUND,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, IDC_ARROW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
     SystemParametersInfoW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
 };
-use windows::core::{BOOL, PCWSTR, w};
+use windows::core::{PCWSTR, w};
 
 use crate::Ui;
 use crate::error::{Call, Error, Result};
@@ -164,22 +164,18 @@ impl ChoicePopup {
             &theme,
             &others,
         )?;
-        let scene = match Scene::new(
+        let guard = native::DestroyOnError::new(hwnd);
+        let scene = Scene::new(
             &gfx,
             hwnd,
             layout.width,
             layout.height,
             layout.window_radius,
             &theme,
-        ) {
-            Ok(scene) => scene,
-            Err(err) => {
-                native::destroy(hwnd);
-                return Err(err);
-            }
-        };
+        )?;
         let state = WindowState::new(self.id.0, self.style, layout, scene, theme, fonts, request);
         let handle = NativeWindow::attach(hwnd, Rc::new(state));
+        guard.disarm();
         handle.state().open(hwnd)?;
         self.active = Some(Active {
             window: handle,
@@ -302,24 +298,13 @@ fn create_window(
         )
         .call("CreateWindowExW")?;
 
-        set_dwm_attribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND.0);
-        set_dwm_attribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, TRUE.0);
-        set_dwm_attribute(
+        native::set_dwm_attribute(
             hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE,
-            BOOL::from(theme.dark).0,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            DWMWCP_DONOTROUND.0 as u32,
         );
+        native::set_dwm_attribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, 1);
+        native::set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, u32::from(theme.dark));
         Ok((hwnd, rect))
-    }
-}
-
-fn set_dwm_attribute(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE, value: i32) {
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            attribute,
-            &value as *const i32 as *const c_void,
-            size_of::<i32>() as u32,
-        );
     }
 }

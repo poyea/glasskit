@@ -57,24 +57,21 @@ use std::rc::Rc;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWM_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWINDOWATTRIBUTE, DwmExtendFrameIntoClientArea,
-    DwmSetWindowAttribute,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea,
 };
 use windows::Win32::Graphics::Gdi::ValidateRect;
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB,
+    GetKeyState, ReleaseCapture, SetCapture, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, GetClientRect, IDC_ARROW, MINMAXINFO,
-    PostMessageW, SIZE_MINIMIZED, SW_SHOWNORMAL, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-    SetForegroundWindow, SetWindowPos, SetWindowTextW, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_APP, WM_CAPTURECHANGED, WM_CLOSE, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE,
-    WM_SYSCOLORCHANGE, WM_THEMECHANGED, WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP,
-    WS_OVERLAPPEDWINDOW,
+    PostMessageW, SIZE_MINIMIZED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
+    SetWindowTextW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE,
+    WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
+    WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -180,7 +177,7 @@ impl Window {
         };
         // Until the state is attached, the window procedure uses the defaults. The window
         // drops if a step fails.
-        let guard = DestroyOnError(Some(hwnd));
+        let guard = native::DestroyOnError::new(hwnd);
         let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
         let (outer_w, outer_h) = outer_size(width, height, scale);
         unsafe {
@@ -244,13 +241,7 @@ impl Window {
 
     /// Show the window and bring it to the front.
     pub fn show(&self) {
-        unsafe {
-            // The first ShowWindow of a process can use the show state from the shortcut or
-            // the parent process. The second call is exact.
-            let _ = ShowWindow(self.hwnd(), SW_SHOWNORMAL);
-            let _ = ShowWindow(self.hwnd(), SW_SHOWNORMAL);
-            let _ = SetForegroundWindow(self.hwnd());
-        }
+        native::show_window(self.hwnd());
     }
 
     /// Add a widget, and give its id. It shows when it is in the tree under the root.
@@ -363,23 +354,6 @@ impl std::fmt::Debug for Window {
     }
 }
 
-/// Destroys a window when a step of its creation fails.
-struct DestroyOnError(Option<HWND>);
-
-impl DestroyOnError {
-    fn disarm(mut self) {
-        self.0 = None;
-    }
-}
-
-impl Drop for DestroyOnError {
-    fn drop(&mut self) {
-        if let Some(hwnd) = self.0 {
-            native::destroy(hwnd);
-        }
-    }
-}
-
 impl State {
     fn push(&self, event: WindowEvent) {
         self.events.borrow_mut().push_back(event);
@@ -417,7 +391,7 @@ impl State {
         }
         self.applied.set(wanted);
         self.theme.set(theme);
-        set_dwm(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, u32::from(theme.dark));
+        native::set_dwm_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, u32::from(theme.dark));
         let mut backdrop = match self.material.get() {
             _ if !theme.glass() => Backdrop::Solid,
             Material::Mica => Backdrop::Mica,
@@ -457,8 +431,8 @@ impl State {
     }
 
     fn point(&self, lparam: LPARAM) -> (f32, f32) {
-        let x = (lparam.0 & 0xFFFF) as i16 as f32;
-        let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+        let (x, y) = native::point(lparam);
+        let (x, y) = (x as f32, y as f32);
         let s = self.scale.get();
         (x / s, y / s)
     }
@@ -489,21 +463,9 @@ impl State {
     }
 }
 
-fn set_dwm(hwnd: HWND, attribute: DWMWINDOWATTRIBUTE, value: u32) -> bool {
-    unsafe {
-        DwmSetWindowAttribute(
-            hwnd,
-            attribute,
-            &value as *const u32 as *const _,
-            size_of::<u32>() as u32,
-        )
-        .is_ok()
-    }
-}
-
 /// Ask DWM for a system backdrop. It fails before Windows 11 22H2.
 fn set_backdrop_type(hwnd: HWND, kind: DWM_SYSTEMBACKDROP_TYPE) -> bool {
-    set_dwm(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, kind.0 as u32)
+    native::set_dwm_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, kind.0 as u32)
 }
 
 /// The window size, in pixels, for a client area of this size in DIPs.
@@ -604,13 +566,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             WM_MOUSEMOVE => {
                 if !state.tracking.get() {
-                    let mut tme = TRACKMOUSEEVENT {
-                        cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                        dwFlags: TME_LEAVE,
-                        hwndTrack: hwnd,
-                        dwHoverTime: 0,
-                    };
-                    state.tracking.set(TrackMouseEvent(&mut tme).is_ok());
+                    state.tracking.set(native::track_leave(hwnd));
                 }
                 let (x, y) = state.point(lparam);
                 let hit = state.tree.borrow().hit(x, y);
