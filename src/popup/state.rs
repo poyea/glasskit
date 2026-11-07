@@ -6,26 +6,20 @@
 use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant, SystemTime};
 
-use windows::Win32::Foundation::{HGLOBAL, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1,
-    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_ROUNDED_RECT,
+    D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_DRAW_TEXT_OPTIONS_NONE,
+    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_ROUNDED_RECT,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, ID2D1DeviceContext,
 };
-use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_HIT_TEST_METRICS, DWRITE_MEASURING_MODE_NATURAL,
-};
+use windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
-use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
-use windows::Win32::System::Ole::CF_UNICODETEXT;
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VIRTUAL_KEY,
-    VK_DELETE, VK_END, VK_HOME, VK_LEFT, VK_RIGHT,
+    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, HWND_TOPMOST, IDC_HAND, KillTimer, LoadCursorW, MA_ACTIVATE, MA_NOACTIVATE,
@@ -37,7 +31,7 @@ use windows_numerics::Vector2;
 
 use super::countdown::{self, Countdown};
 use super::glass::{self, Scene};
-use super::input::TextBox;
+use super::input::{Frame, TextBox, clipboard_text};
 use super::layout::{Fonts, Layout};
 use super::{Image, Mark, PopupStyle, Prompt, Reply, Response};
 use crate::error::{Call, Result};
@@ -55,8 +49,6 @@ const ENTER: u16 = 0x0D;
 /// Ctrl+V.
 const PASTE: u16 = 0x16;
 const ESCAPE: u16 = 0x1B;
-/// The clipboard text that a paste reads, at most, in UTF-16 units.
-const MAX_PASTE: usize = 4096;
 
 /// The window procedure can run again inside a call that it makes. For example,
 /// `ReleaseCapture` sends `WM_CAPTURECHANGED`. Thus the state is shared and changes only in
@@ -328,108 +320,13 @@ impl WindowState {
         let Some(input) = &self.input else {
             return false;
         };
-        let changed = {
-            let mut b = input.borrow_mut();
-            match VIRTUAL_KEY(key) {
-                VK_LEFT => b.left(),
-                VK_RIGHT => b.right(),
-                VK_HOME => b.home(),
-                VK_END => b.end(),
-                VK_DELETE => b.delete(),
-                _ => return false,
-            }
+        let Some(changed) = input.borrow_mut().press(key) else {
+            return false;
         };
         if changed {
             self.redraw();
         }
         true
-    }
-
-    /// Draw the input box: its frame, the text or the placeholder, and the caret.
-    fn draw_input(
-        &self,
-        dc: &ID2D1DeviceContext,
-        input: &TextBox,
-        rect: D2D_RECT_F,
-        radius: f32,
-        padding: f32,
-    ) -> windows::core::Result<()> {
-        let t = &self.theme;
-        unsafe {
-            let shape = D2D1_ROUNDED_RECT {
-                rect,
-                radiusX: radius,
-                radiusY: radius,
-            };
-            dc.FillRoundedRectangle(&shape, &dc.CreateSolidColorBrush(&t.button, None)?);
-            let edge = if input.focused {
-                t.text
-            } else {
-                t.button_border
-            };
-            let outline = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: rect.left + 0.5,
-                    top: rect.top + 0.5,
-                    right: rect.right - 0.5,
-                    bottom: rect.bottom - 0.5,
-                },
-                radiusX: radius,
-                radiusY: radius,
-            };
-            dc.DrawRoundedRectangle(&outline, &dc.CreateSolidColorBrush(&edge, None)?, 1.0, None);
-
-            let empty = input.text().is_empty();
-            let shown = if empty {
-                input.placeholder.as_str()
-            } else {
-                input.text()
-            };
-            let wide: Vec<u16> = shown.encode_utf16().collect();
-            let width = rect.right - rect.left - 2.0 * padding;
-            let height = rect.bottom - rect.top;
-            let layout =
-                self.fonts
-                    .dwrite
-                    .CreateTextLayout(&wide, &self.fonts.input, width, height)?;
-            // Where the caret is, so the text can scroll left to keep it in the box.
-            let (mut x, mut y) = (0.0, 0.0);
-            let mut caret = DWRITE_HIT_TEST_METRICS::default();
-            let position = if empty { 0 } else { input.caret_utf16() };
-            layout.HitTestTextPosition(position, false, &mut x, &mut y, &mut caret)?;
-            let scroll = (x - width).max(0.0);
-            let origin = Vector2 {
-                X: rect.left + padding - scroll,
-                Y: rect.top,
-            };
-            let mut color = t.text;
-            if empty {
-                color.a *= 0.5;
-            }
-            dc.PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_ALIASED);
-            dc.DrawTextLayout(
-                origin,
-                &layout,
-                &dc.CreateSolidColorBrush(&color, None)?,
-                D2D1_DRAW_TEXT_OPTIONS_NONE,
-            );
-            if input.focused {
-                let x = (origin.X + x).round() + 0.5;
-                let top = origin.Y + caret.top;
-                dc.DrawLine(
-                    Vector2 { X: x, Y: top },
-                    Vector2 {
-                        X: x,
-                        Y: top + caret.height,
-                    },
-                    &dc.CreateSolidColorBrush(&t.text, None)?,
-                    1.0,
-                    None,
-                );
-            }
-            dc.PopAxisAlignedClip();
-        }
-        Ok(())
     }
 
     fn hit(&self, lparam: LPARAM) -> Option<usize> {
@@ -469,7 +366,12 @@ impl WindowState {
                 draw_image(dc, image, rect)?;
             }
             if let (Some(rect), Some(input)) = (l.input, &self.input) {
-                self.draw_input(dc, &input.borrow(), rect, l.radius, l.input_padding)?;
+                let frame = Frame {
+                    rect,
+                    radius: l.radius,
+                    padding: l.input_padding,
+                };
+                input.borrow().draw(dc, frame, &self.theme, &self.fonts)?;
             }
 
             let border = dc.CreateSolidColorBrush(&t.button_border, None)?;
@@ -519,35 +421,6 @@ impl WindowState {
     /// A failed redraw keeps the last frame. The next redraw tries again.
     fn redraw(&self) {
         let _ = self.draw();
-    }
-}
-
-/// The text on the clipboard, if there is text.
-fn clipboard_text(hwnd: HWND) -> Option<String> {
-    unsafe {
-        OpenClipboard(Some(hwnd)).ok()?;
-        let text = read_clipboard_text();
-        let _ = CloseClipboard();
-        text
-    }
-}
-
-/// Read the text of the clipboard. The clipboard must be open.
-unsafe fn read_clipboard_text() -> Option<String> {
-    unsafe {
-        let handle = GetClipboardData(u32::from(CF_UNICODETEXT.0)).ok()?;
-        let global = HGLOBAL(handle.0);
-        let start = GlobalLock(global) as *const u16;
-        if start.is_null() {
-            return None;
-        }
-        let mut len = 0;
-        while len < MAX_PASTE && *start.add(len) != 0 {
-            len += 1;
-        }
-        let text = String::from_utf16_lossy(std::slice::from_raw_parts(start, len));
-        let _ = GlobalUnlock(global);
-        Some(text)
     }
 }
 

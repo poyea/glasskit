@@ -1,11 +1,38 @@
 // Copyright (c) 2026 John Law
 // SPDX-License-Identifier: MIT
 
-//! The text and the caret of the input box of a popup. It has no window code, so it is
-//! easy to test.
+//! The input box of a popup: its text and caret, its keys, its drawing, and paste.
+
+use windows::Win32::Foundation::{HGLOBAL, HWND};
+use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, ID2D1DeviceContext,
+};
+use windows::Win32::Graphics::DirectWrite::DWRITE_HIT_TEST_METRICS;
+use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
+use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
+use windows::Win32::System::Ole::CF_UNICODETEXT;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    VIRTUAL_KEY, VK_DELETE, VK_END, VK_HOME, VK_LEFT, VK_RIGHT,
+};
+use windows_numerics::Vector2;
+
+use super::layout::Fonts;
+use crate::theme::Theme;
 
 /// The most characters that the box takes.
 const MAX_CHARS: usize = 200;
+/// The clipboard text that a paste reads, at most, in UTF-16 units.
+const MAX_PASTE: usize = 4096;
+
+/// Where the input box shows.
+#[derive(Clone, Copy)]
+pub(super) struct Frame {
+    pub(super) rect: D2D_RECT_F,
+    pub(super) radius: f32,
+    /// The space between the edge and the text.
+    pub(super) padding: f32,
+}
 
 pub(super) struct TextBox {
     pub(super) placeholder: String,
@@ -116,6 +143,138 @@ impl TextBox {
 
     pub(super) fn end(&mut self) -> bool {
         std::mem::replace(&mut self.caret, self.text.len()) != self.text.len()
+    }
+
+    /// Handle a key that moves the caret or deletes. It gives `None` for other keys, and
+    /// else whether the text or the caret changed.
+    pub(super) fn press(&mut self, key: u16) -> Option<bool> {
+        Some(match VIRTUAL_KEY(key) {
+            VK_LEFT => self.left(),
+            VK_RIGHT => self.right(),
+            VK_HOME => self.home(),
+            VK_END => self.end(),
+            VK_DELETE => self.delete(),
+            _ => return None,
+        })
+    }
+
+    /// Draw the input box: its frame, the text or the placeholder, and the caret.
+    pub(super) fn draw(
+        &self,
+        dc: &ID2D1DeviceContext,
+        frame: Frame,
+        theme: &Theme,
+        fonts: &Fonts,
+    ) -> windows::core::Result<()> {
+        let Frame {
+            rect,
+            radius,
+            padding,
+        } = frame;
+        let t = theme;
+        unsafe {
+            let shape = D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: radius,
+                radiusY: radius,
+            };
+            dc.FillRoundedRectangle(&shape, &dc.CreateSolidColorBrush(&t.button, None)?);
+            let edge = if self.focused {
+                t.text
+            } else {
+                t.button_border
+            };
+            let outline = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: rect.left + 0.5,
+                    top: rect.top + 0.5,
+                    right: rect.right - 0.5,
+                    bottom: rect.bottom - 0.5,
+                },
+                radiusX: radius,
+                radiusY: radius,
+            };
+            dc.DrawRoundedRectangle(&outline, &dc.CreateSolidColorBrush(&edge, None)?, 1.0, None);
+
+            let empty = self.text().is_empty();
+            let shown = if empty {
+                self.placeholder.as_str()
+            } else {
+                self.text()
+            };
+            let wide: Vec<u16> = shown.encode_utf16().collect();
+            let width = rect.right - rect.left - 2.0 * padding;
+            let height = rect.bottom - rect.top;
+            let layout = fonts
+                .dwrite
+                .CreateTextLayout(&wide, &fonts.input, width, height)?;
+            // Where the caret is, so the text can scroll left to keep it in the box.
+            let (mut x, mut y) = (0.0, 0.0);
+            let mut caret = DWRITE_HIT_TEST_METRICS::default();
+            let position = if empty { 0 } else { self.caret_utf16() };
+            layout.HitTestTextPosition(position, false, &mut x, &mut y, &mut caret)?;
+            let scroll = (x - width).max(0.0);
+            let origin = Vector2 {
+                X: rect.left + padding - scroll,
+                Y: rect.top,
+            };
+            let mut color = t.text;
+            if empty {
+                color.a *= 0.5;
+            }
+            dc.PushAxisAlignedClip(&rect, D2D1_ANTIALIAS_MODE_ALIASED);
+            dc.DrawTextLayout(
+                origin,
+                &layout,
+                &dc.CreateSolidColorBrush(&color, None)?,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+            );
+            if self.focused {
+                let x = (origin.X + x).round() + 0.5;
+                let top = origin.Y + caret.top;
+                dc.DrawLine(
+                    Vector2 { X: x, Y: top },
+                    Vector2 {
+                        X: x,
+                        Y: top + caret.height,
+                    },
+                    &dc.CreateSolidColorBrush(&t.text, None)?,
+                    1.0,
+                    None,
+                );
+            }
+            dc.PopAxisAlignedClip();
+        }
+        Ok(())
+    }
+}
+
+/// The text on the clipboard, if there is text.
+pub(super) fn clipboard_text(hwnd: HWND) -> Option<String> {
+    unsafe {
+        OpenClipboard(Some(hwnd)).ok()?;
+        let text = read_clipboard_text();
+        let _ = CloseClipboard();
+        text
+    }
+}
+
+/// Read the text of the clipboard. The clipboard must be open.
+unsafe fn read_clipboard_text() -> Option<String> {
+    unsafe {
+        let handle = GetClipboardData(u32::from(CF_UNICODETEXT.0)).ok()?;
+        let global = HGLOBAL(handle.0);
+        let start = GlobalLock(global) as *const u16;
+        if start.is_null() {
+            return None;
+        }
+        let mut len = 0;
+        while len < MAX_PASTE && *start.add(len) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(start, len));
+        let _ = GlobalUnlock(global);
+        Some(text)
     }
 }
 
