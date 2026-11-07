@@ -127,7 +127,7 @@ pub(super) fn paint(
                 draw_text(dc, formats, text, formats.text_format(*style), r, color)?;
             }
             Content::Button { label, accent } => {
-                let state = State {
+                let state = ButtonState {
                     hover: now.hover == Some(index),
                     pressed: now.pressed == Some(index) && now.hover == Some(index),
                     enabled: node.enabled,
@@ -149,7 +149,7 @@ pub(super) fn paint(
 }
 
 #[derive(Clone, Copy)]
-struct State {
+struct ButtonState {
     hover: bool,
     pressed: bool,
     enabled: bool,
@@ -160,7 +160,7 @@ fn button(
     theme: &Theme,
     r: Rect,
     accent: bool,
-    s: State,
+    s: ButtonState,
 ) -> windows::core::Result<()> {
     let mut fill = if accent {
         let mut c = theme.accent;

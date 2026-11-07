@@ -7,8 +7,8 @@
 use super::{Align, Insets, Length, TextStyle};
 
 /// The inner space of a button around its label, in DIPs.
-pub(crate) const BUTTON_PADDING: (f32, f32) = (12.0, 6.0);
-pub(crate) const BUTTON_MIN: (f32, f32) = (64.0, 32.0);
+const BUTTON_PADDING: (f32, f32) = (12.0, 6.0);
+const BUTTON_MIN: (f32, f32) = (64.0, 32.0);
 
 /// A rectangle in DIPs.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -142,16 +142,15 @@ impl Tree {
     /// Add a widget. Its children move out of any container that held them before.
     pub fn add(&mut self, node: Node) -> usize {
         let index = self.nodes.len();
-        let children: Vec<usize> = node
-            .children()
-            .iter()
-            .copied()
-            .filter(|&c| c < index)
-            .collect();
+        let mut children: Vec<usize> = Vec::new();
+        for &child in node.children() {
+            if child < index && !children.contains(&child) {
+                children.push(child);
+            }
+        }
         self.nodes.push(node);
         if let Some(c) = &mut self.nodes[index].container {
-            c.children.retain(|&child| child < index);
-            c.children.dedup();
+            c.children.clone_from(&children);
         }
         for child in children {
             if let Some(old) = self.nodes[child].parent.replace(index)
@@ -591,6 +590,18 @@ mod tests {
         assert!(t.nodes[first].children().is_empty());
         assert_eq!(t.nodes[second].children(), [a]);
         assert_eq!(t.nodes[a].parent, Some(second));
+    }
+
+    #[test]
+    fn a_child_listed_twice_is_in_its_container_once() {
+        let mut t = Tree::default();
+        let a = t.add(text("a"));
+        let b = t.add(text("b"));
+        let col = t.add(with(
+            Node::container(Content::Blank, Axis::Column, Align::Start),
+            &[a, b, a],
+        ));
+        assert_eq!(t.nodes[col].children(), [a, b]);
     }
 
     #[test]

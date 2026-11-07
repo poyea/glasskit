@@ -130,6 +130,8 @@ pub enum WindowEvent {
 pub struct Window {
     id: WindowId,
     native: NativeWindow<State>,
+    /// The thread setup. It goes last, after the window.
+    _ui: Ui,
 }
 
 struct State {
@@ -217,6 +219,7 @@ impl Window {
         let window = Self {
             id: WindowId(id),
             native,
+            _ui: ui.clone(),
         };
         window.state().apply_theme(hwnd);
         window.state().render();
@@ -449,7 +452,8 @@ impl State {
         (x / s, y / s)
     }
 
-    fn key(&self, hwnd: HWND, key: u16) -> bool {
+    /// Handle a key. `repeat` is true for the messages that a held key sends again.
+    fn key(&self, hwnd: HWND, key: u16, repeat: bool) -> bool {
         match key {
             k if k == VK_TAB.0 => {
                 let back = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
@@ -460,6 +464,7 @@ impl State {
                 });
                 true
             }
+            k if (k == VK_SPACE.0 || k == VK_RETURN.0) && repeat => true,
             k if k == VK_SPACE.0 || k == VK_RETURN.0 => {
                 let focus = self.now.get().focus;
                 if let Some(focus) = focus.filter(|&f| self.tree.borrow().focusable(f)) {
@@ -638,7 +643,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_KEYDOWN => {
-                if state.key(hwnd, wparam.0 as u16) {
+                // Bit 30 is set when the key was down before this message.
+                let repeat = (lparam.0 >> 30) & 1 == 1;
+                if state.key(hwnd, wparam.0 as u16, repeat) {
                     LRESULT(0)
                 } else {
                     DefWindowProcW(hwnd, msg, wparam, lparam)
