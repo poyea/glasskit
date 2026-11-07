@@ -1,30 +1,28 @@
 // Copyright (c) 2026 John Law
 // SPDX-License-Identifier: MIT
 
-//! The Composition scene of a popup: the blurred backdrop, the tint, the content, and the fade.
+//! The Composition scene of a popup: the glass backdrop, the content, the rounded clip, and
+//! the fade.
 
 use std::time::Duration;
 
-use windows::Foundation::{Size, TimeSpan};
-use windows::Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat};
+use windows::Foundation::TimeSpan;
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
-use windows::UI::Composition::{CompositionDrawingSurface, Compositor, ContainerVisual};
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::UI::Composition::{Compositor, ContainerVisual};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::ID2D1DeviceContext;
-use windows::Win32::System::WinRT::Composition::{
-    ICompositionDrawingSurfaceInterop, ICompositorDesktopInterop,
-};
+use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows::core::{HSTRING, Interface};
-use windows_numerics::{Matrix3x2, Vector2};
+use windows_numerics::Vector2;
 
 use crate::error::{Call, Result};
-use crate::render::Graphics;
-use crate::theme::{Theme, rgba};
+use crate::render::{self, Graphics, Surface};
+use crate::theme::Theme;
 
 pub struct Scene {
     compositor: Compositor,
     root: ContainerVisual,
-    surface: CompositionDrawingSurface,
+    surface: Surface,
     _target: DesktopWindowTarget,
 }
 
@@ -71,33 +69,10 @@ impl Scene {
         })?;
         root.SetClip(&c.CreateGeometricClipWithGeometry(&shape)?)?;
 
-        let backdrop = c.CreateSpriteVisual()?;
-        backdrop.SetRelativeSizeAdjustment(full)?;
-        backdrop.SetBrush(&c.CreateHostBackdropBrush()?)?;
-
-        let tint = c.CreateSpriteVisual()?;
-        tint.SetRelativeSizeAdjustment(full)?;
-        tint.SetBrush(&c.CreateColorBrushWithColor(theme.tint)?)?;
-
-        let surface = gfx.graphics_device.CreateDrawingSurface(
-            Size {
-                Width: width,
-                Height: height,
-            },
-            DirectXPixelFormat::B8G8R8A8UIntNormalized,
-            DirectXAlphaMode::Premultiplied,
-        )?;
-        let content = c.CreateSpriteVisual()?;
-        content.SetSize(Vector2 {
-            X: width,
-            Y: height,
-        })?;
-        content.SetBrush(&c.CreateSurfaceBrushWithSurface(&surface)?)?;
-
+        let surface = Surface::new(gfx, width, height)?;
         let children = root.Children()?;
-        children.InsertAtTop(&backdrop)?;
-        children.InsertAtTop(&tint)?;
-        children.InsertAtTop(&content)?;
+        render::add_backdrop(c, &children, true, theme.tint)?;
+        children.InsertAtTop(surface.sprite())?;
         target.SetRoot(&root)?;
 
         Ok(Self {
@@ -127,18 +102,7 @@ impl Scene {
         &self,
         paint: impl FnOnce(&ID2D1DeviceContext) -> windows::core::Result<()>,
     ) -> Result<()> {
-        let interop: ICompositionDrawingSurfaceInterop = self
-            .surface
-            .cast()
-            .call("QueryInterface(ICompositionDrawingSurfaceInterop)")?;
-        unsafe {
-            let mut offset = POINT::default();
-            let dc: ID2D1DeviceContext = interop.BeginDraw(None, &mut offset).call("BeginDraw")?;
-            dc.SetTransform(&Matrix3x2::translation(offset.x as f32, offset.y as f32));
-            dc.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
-            let painted = paint(&dc);
-            interop.EndDraw().call("EndDraw")?;
-            painted.call("drawing the popup")
-        }
+        // The popup lays out in pixels.
+        self.surface.draw(1.0, paint)
     }
 }

@@ -6,17 +6,16 @@
 
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
-    ID2D1DeviceContext,
+    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, ID2D1DeviceContext,
 };
 use windows::Win32::Graphics::DirectWrite::{
-    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_METRICS,
-    DWRITE_WORD_WRAPPING_NO_WRAP, IDWriteFactory, IDWriteTextFormat,
+    DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_WORD_WRAPPING_NO_WRAP,
+    IDWriteFactory, IDWriteTextFormat,
 };
 use windows_numerics::Vector2;
 
 use crate::error::{Call, Result};
-use crate::render::Graphics;
+use crate::render::{self, Graphics};
 use crate::theme::Theme;
 use crate::widget::TextStyle;
 use crate::widget::tree::{Content, Measure, Rect, Tree};
@@ -65,20 +64,7 @@ impl Formats {
     }
 
     fn size_of(&self, text: &str, format: &IDWriteTextFormat, max_width: f32) -> (f32, f32) {
-        let wide: Vec<u16> = text.encode_utf16().collect();
-        let mut metrics = DWRITE_TEXT_METRICS::default();
-        let measured = unsafe {
-            self.dwrite
-                .CreateTextLayout(&wide, format, max_width.max(1.0), f32::MAX)
-                .and_then(|layout| layout.GetMetrics(&mut metrics))
-        };
-        match measured {
-            Ok(()) => (
-                metrics.widthIncludingTrailingWhitespace.ceil(),
-                metrics.height.ceil(),
-            ),
-            Err(_) => (0.0, 0.0),
-        }
+        render::text_size(&self.dwrite, text, format, max_width).unwrap_or((0.0, 0.0))
     }
 }
 
@@ -183,7 +169,6 @@ fn button(
     panel(dc, r, BUTTON_RADIUS, fill, theme.button_border)
 }
 
-/// A rounded rectangle with a fill and a 1 DIP border inside its edge.
 fn panel(
     dc: &ID2D1DeviceContext,
     r: Rect,
@@ -191,18 +176,12 @@ fn panel(
     fill: D2D1_COLOR_F,
     border: D2D1_COLOR_F,
 ) -> windows::core::Result<()> {
-    unsafe {
-        let shape = rounded(r, 0.0, radius);
-        dc.FillRoundedRectangle(&shape, &dc.CreateSolidColorBrush(&fill, None)?);
-        let edge = rounded(r, 0.5, radius);
-        dc.DrawRoundedRectangle(&edge, &dc.CreateSolidColorBrush(&border, None)?, 1.0, None);
-    }
-    Ok(())
+    render::panel(dc, d2d(r), radius, &fill, &border)
 }
 
 fn focus_ring(dc: &ID2D1DeviceContext, theme: &Theme, r: Rect) -> windows::core::Result<()> {
     unsafe {
-        let ring = rounded(r, -FOCUS_GAP, BUTTON_RADIUS + FOCUS_GAP);
+        let ring = render::rounded(d2d(r), -FOCUS_GAP, BUTTON_RADIUS + FOCUS_GAP);
         dc.DrawRoundedRectangle(
             &ring,
             &dc.CreateSolidColorBrush(&theme.text, None)?,
@@ -236,17 +215,11 @@ fn draw_text(
     Ok(())
 }
 
-/// `r` made smaller by `inset` on each side (larger if `inset` is negative), with rounded
-/// corners.
-fn rounded(r: Rect, inset: f32, radius: f32) -> D2D1_ROUNDED_RECT {
-    D2D1_ROUNDED_RECT {
-        rect: D2D_RECT_F {
-            left: r.x + inset,
-            top: r.y + inset,
-            right: r.x + r.w - inset,
-            bottom: r.y + r.h - inset,
-        },
-        radiusX: (radius - inset.max(0.0)).max(0.0),
-        radiusY: (radius - inset.max(0.0)).max(0.0),
+fn d2d(r: Rect) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: r.x,
+        top: r.y,
+        right: r.x + r.w,
+        bottom: r.y + r.h,
     }
 }

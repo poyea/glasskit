@@ -12,8 +12,8 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_ROUNDED_RECT,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, ID2D1DeviceContext,
+    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    ID2D1DeviceContext,
 };
 use windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL;
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -346,11 +346,11 @@ impl WindowState {
         };
         self.scene.draw(|dc: &ID2D1DeviceContext| unsafe {
             dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-            let frame = D2D1_ROUNDED_RECT {
-                rect: render::rect(0.5, 0.5, l.width - 1.0, l.height - 1.0),
-                radiusX: l.window_radius,
-                radiusY: l.window_radius,
-            };
+            let frame = render::rounded(
+                render::rect(0.0, 0.0, l.width, l.height),
+                0.5,
+                l.window_radius,
+            );
             let window_border = dc.CreateSolidColorBrush(&t.window_border, None)?;
             dc.DrawRoundedRectangle(&frame, &window_border, 1.0, None);
 
@@ -373,7 +373,6 @@ impl WindowState {
                 input.borrow().draw(dc, frame, &self.theme, &self.fonts)?;
             }
 
-            let border = dc.CreateSolidColorBrush(&t.button_border, None)?;
             for (i, b) in l.buttons.iter().enumerate() {
                 let mark = shown
                     .iter()
@@ -386,24 +385,7 @@ impl WindowState {
                     _ if hover == Some(i) => t.button_hover,
                     _ => t.button,
                 };
-                let fill = dc.CreateSolidColorBrush(&fill, None)?;
-                let shape = D2D1_ROUNDED_RECT {
-                    rect: b.rect,
-                    radiusX: l.radius,
-                    radiusY: l.radius,
-                };
-                dc.FillRoundedRectangle(&shape, &fill);
-                let outline = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: b.rect.left + 0.5,
-                        top: b.rect.top + 0.5,
-                        right: b.rect.right - 0.5,
-                        bottom: b.rect.bottom - 0.5,
-                    },
-                    radiusX: l.radius,
-                    radiusY: l.radius,
-                };
-                dc.DrawRoundedRectangle(&outline, &border, 1.0, None);
+                render::panel(dc, b.rect, l.radius, &fill, &t.button_border)?;
                 dc.DrawText(
                     &b.label,
                     &self.fonts.button,

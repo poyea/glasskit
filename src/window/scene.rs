@@ -4,23 +4,17 @@
 //! The Composition tree of a window: a background for the material, and the drawn content
 //! on top of it.
 
-use windows::Foundation::Size;
-use windows::Graphics::DirectX::{DirectXAlphaMode, DirectXPixelFormat};
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
-use windows::UI::Composition::{
-    CompositionDrawingSurface, Compositor, ContainerVisual, SpriteVisual,
-};
-use windows::Win32::Foundation::{HWND, POINT, SIZE};
+use windows::UI::Composition::{Compositor, ContainerVisual};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Direct2D::ID2D1DeviceContext;
-use windows::Win32::System::WinRT::Composition::{
-    ICompositionDrawingSurfaceInterop, ICompositorDesktopInterop,
-};
+use windows::Win32::System::WinRT::Composition::ICompositorDesktopInterop;
 use windows::core::Interface;
-use windows_numerics::{Matrix3x2, Vector2};
+use windows_numerics::Vector2;
 
 use crate::error::{Call, Result};
-use crate::render::Graphics;
-use crate::theme::{Theme, rgba};
+use crate::render::{self, Graphics, Surface};
+use crate::theme::Theme;
 
 /// The background that a window uses now. It can differ from the material that the app
 /// asks for, for example when transparency effects are off.
@@ -37,8 +31,7 @@ pub(super) enum Backdrop {
 pub(super) struct Scene {
     compositor: Compositor,
     background: ContainerVisual,
-    content: SpriteVisual,
-    surface: CompositionDrawingSurface,
+    surface: Surface,
     _target: DesktopWindowTarget,
 }
 
@@ -58,30 +51,14 @@ impl Scene {
         root.SetRelativeSizeAdjustment(full)?;
         let background = c.CreateContainerVisual()?;
         background.SetRelativeSizeAdjustment(full)?;
-
-        let surface = gfx.graphics_device.CreateDrawingSurface(
-            Size {
-                Width: width.max(1) as f32,
-                Height: height.max(1) as f32,
-            },
-            DirectXPixelFormat::B8G8R8A8UIntNormalized,
-            DirectXAlphaMode::Premultiplied,
-        )?;
-        let content = c.CreateSpriteVisual()?;
-        content.SetSize(Vector2 {
-            X: width.max(1) as f32,
-            Y: height.max(1) as f32,
-        })?;
-        content.SetBrush(&c.CreateSurfaceBrushWithSurface(&surface)?)?;
-
+        let surface = Surface::new(gfx, width as f32, height as f32)?;
         let children = root.Children()?;
         children.InsertAtTop(&background)?;
-        children.InsertAtTop(&content)?;
+        children.InsertAtTop(surface.sprite())?;
         target.SetRoot(&root)?;
         Ok(Self {
             compositor: c.clone(),
             background,
-            content,
             surface,
             _target: target,
         })
@@ -89,57 +66,23 @@ impl Scene {
 
     /// Show this background.
     pub(super) fn set_backdrop(&self, backdrop: Backdrop, theme: &Theme) -> Result<()> {
-        self.build_backdrop(backdrop, theme)
-            .call("changing the window background")
-    }
-
-    fn build_backdrop(&self, backdrop: Backdrop, theme: &Theme) -> windows::core::Result<()> {
-        let c = &self.compositor;
-        let full = Vector2 { X: 1.0, Y: 1.0 };
-        let children = self.background.Children()?;
-        children.RemoveAll()?;
-        let sprite = |brush: &windows::UI::Composition::CompositionBrush| {
-            let s = c.CreateSpriteVisual()?;
-            s.SetRelativeSizeAdjustment(full)?;
-            s.SetBrush(brush)?;
-            children.InsertAtTop(&s)
-        };
+        let children = self.background.Children().call("Children")?;
+        children.RemoveAll().call("RemoveAll")?;
         match backdrop {
-            Backdrop::Mica => {}
-            Backdrop::Glass => {
-                sprite(&c.CreateHostBackdropBrush()?.cast()?)?;
-                sprite(&c.CreateColorBrushWithColor(theme.tint)?.cast()?)?;
-            }
-            Backdrop::Solid => {
-                let mut color = theme.tint;
-                color.A = 255;
-                sprite(&c.CreateColorBrushWithColor(color)?.cast()?)?;
-            }
+            Backdrop::Mica => Ok(()),
+            Backdrop::Glass | Backdrop::Solid => render::add_backdrop(
+                &self.compositor,
+                &children,
+                backdrop == Backdrop::Glass,
+                theme.tint,
+            )
+            .call("changing the window background"),
         }
-        Ok(())
     }
 
     /// Make the drawing surface this many pixels.
     pub(super) fn resize(&self, width: u32, height: u32) -> Result<()> {
-        let (w, h) = (width.max(1), height.max(1));
-        let interop: ICompositionDrawingSurfaceInterop = self
-            .surface
-            .cast()
-            .call("QueryInterface(ICompositionDrawingSurfaceInterop)")?;
-        unsafe {
-            interop
-                .Resize(SIZE {
-                    cx: w as i32,
-                    cy: h as i32,
-                })
-                .call("Resize")?;
-        }
-        self.content
-            .SetSize(Vector2 {
-                X: w as f32,
-                Y: h as f32,
-            })
-            .call("SetSize")
+        self.surface.resize(width, height)
     }
 
     /// Draw the content. `paint` draws in DIPs: the scene scales them to pixels.
@@ -148,25 +91,6 @@ impl Scene {
         scale: f32,
         paint: impl FnOnce(&ID2D1DeviceContext) -> windows::core::Result<()>,
     ) -> Result<()> {
-        let interop: ICompositionDrawingSurfaceInterop = self
-            .surface
-            .cast()
-            .call("QueryInterface(ICompositionDrawingSurfaceInterop)")?;
-        unsafe {
-            let mut offset = POINT::default();
-            let dc: ID2D1DeviceContext = interop.BeginDraw(None, &mut offset).call("BeginDraw")?;
-            dc.SetTransform(&Matrix3x2 {
-                M11: scale,
-                M12: 0.0,
-                M21: 0.0,
-                M22: scale,
-                M31: offset.x as f32,
-                M32: offset.y as f32,
-            });
-            dc.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
-            let painted = paint(&dc);
-            interop.EndDraw().call("EndDraw")?;
-            painted.call("drawing the window")
-        }
+        self.surface.draw(scale, paint)
     }
 }

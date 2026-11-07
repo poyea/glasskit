@@ -141,16 +141,16 @@ pub(super) fn rounded(
     bottom: f32,
     radius: f32,
 ) -> D2D1_ROUNDED_RECT {
-    D2D1_ROUNDED_RECT {
-        rect: D2D_RECT_F {
+    crate::render::rounded(
+        D2D_RECT_F {
             left,
             top,
             right,
             bottom,
         },
-        radiusX: radius,
-        radiusY: radius,
-    }
+        0.0,
+        radius,
+    )
 }
 
 /// Hover colors for buttons and drop-downs, and a closed drop-down that looks like a button.

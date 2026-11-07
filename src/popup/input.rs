@@ -6,7 +6,7 @@
 use windows::Win32::Foundation::{HGLOBAL, HWND};
 use windows::Win32::Graphics::Direct2D::Common::D2D_RECT_F;
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, ID2D1DeviceContext,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_NONE, ID2D1DeviceContext,
 };
 use windows::Win32::Graphics::DirectWrite::DWRITE_HIT_TEST_METRICS;
 use windows::Win32::System::DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard};
@@ -18,6 +18,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows_numerics::Vector2;
 
 use super::layout::Fonts;
+use crate::render;
 use crate::theme::Theme;
 
 /// The most characters that the box takes.
@@ -173,28 +174,12 @@ impl TextBox {
         } = frame;
         let t = theme;
         unsafe {
-            let shape = D2D1_ROUNDED_RECT {
-                rect,
-                radiusX: radius,
-                radiusY: radius,
-            };
-            dc.FillRoundedRectangle(&shape, &dc.CreateSolidColorBrush(&t.button, None)?);
             let edge = if self.focused {
                 t.text
             } else {
                 t.button_border
             };
-            let outline = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: rect.left + 0.5,
-                    top: rect.top + 0.5,
-                    right: rect.right - 0.5,
-                    bottom: rect.bottom - 0.5,
-                },
-                radiusX: radius,
-                radiusY: radius,
-            };
-            dc.DrawRoundedRectangle(&outline, &dc.CreateSolidColorBrush(&edge, None)?, 1.0, None);
+            render::panel(dc, rect, radius, &t.button, &edge)?;
 
             let empty = self.text().is_empty();
             let shown = if empty {
