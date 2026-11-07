@@ -12,7 +12,7 @@ pub enum Error {
     /// A Windows API call failed.
     Windows {
         /// The Windows function that failed, or what `glasskit` was doing, for example
-        /// `CreateWindowExW` or `drawing the popup`.
+        /// `CreateWindowExW` or `drawing`.
         context: &'static str,
         /// The error that Windows gave.
         source: windows::core::Error,
@@ -81,6 +81,24 @@ impl fmt::Display for Error {
     }
 }
 
+impl Error {
+    /// The GPU device is gone, for example after a driver update or a GPU reset. The
+    /// devices must be made again.
+    pub(crate) fn device_lost(&self) -> bool {
+        const DXGI_ERROR_DEVICE_REMOVED: i32 = 0x887A_0005_u32 as i32;
+        const DXGI_ERROR_DEVICE_RESET: i32 = 0x887A_0007_u32 as i32;
+        const D2DERR_RECREATE_TARGET: i32 = 0x8899_000C_u32 as i32;
+        matches!(
+            self,
+            Error::Windows { source, .. }
+                if matches!(
+                    source.code().0,
+                    DXGI_ERROR_DEVICE_REMOVED | DXGI_ERROR_DEVICE_RESET | D2DERR_RECREATE_TARGET
+                )
+        )
+    }
+}
+
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
@@ -108,6 +126,22 @@ impl<T> Call<T> for windows::core::Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn windows(code: u32) -> Error {
+        Error::Windows {
+            context: "drawing",
+            source: windows::core::Error::from_hresult(windows::core::HRESULT(code as i32)),
+        }
+    }
+
+    #[test]
+    fn only_gpu_loss_counts_as_device_lost() {
+        assert!(windows(0x887A_0005).device_lost());
+        assert!(windows(0x887A_0007).device_lost());
+        assert!(windows(0x8899_000C).device_lost());
+        assert!(!windows(0x8007_0005).device_lost());
+        assert!(!Error::PopupShowing.device_lost());
+    }
 
     #[test]
     fn windows_error_names_the_call() {

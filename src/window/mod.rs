@@ -133,7 +133,8 @@ pub struct Window {
 
 struct State {
     id: u32,
-    scene: Scene,
+    /// The GPU part. It is made again after a device loss.
+    gpu: RefCell<Option<Gpu>>,
     formats: Formats,
     tree: RefCell<Tree>,
     events: RefCell<VecDeque<WindowEvent>>,
@@ -149,7 +150,12 @@ struct State {
     redraw_posted: Cell<bool>,
     /// The theme and material that the background shows now.
     applied: Cell<Option<(Theme, Material)>>,
-    /// The GPU devices. They go last, after the scene.
+}
+
+/// The scene and the GPU devices that it draws with.
+struct Gpu {
+    scene: Scene,
+    /// The devices go last, after the scene.
     _gfx: Graphics,
 }
 
@@ -199,7 +205,7 @@ impl Window {
         let id = ui.new_id();
         let state = State {
             id,
-            scene,
+            gpu: RefCell::new(Some(Gpu { scene, _gfx: gfx })),
             formats,
             tree: RefCell::new(Tree::default()),
             events: RefCell::new(VecDeque::new()),
@@ -212,7 +218,6 @@ impl Window {
             tracking: Cell::new(false),
             redraw_posted: Cell::new(false),
             applied: Cell::new(None),
-            _gfx: gfx,
         };
         let native = NativeWindow::attach(hwnd, Rc::new(state));
         guard.disarm();
@@ -222,7 +227,7 @@ impl Window {
             _ui: ui.clone(),
         };
         window.state().apply_theme(hwnd);
-        window.state().render();
+        window.state().render(hwnd);
         Ok(window)
     }
 
@@ -331,7 +336,7 @@ impl Window {
     pub fn set_material(&self, material: Material) {
         self.state().material.set(material);
         if self.state().apply_theme(self.hwnd()) {
-            self.state().render();
+            self.state().render(self.hwnd());
         }
     }
 
@@ -371,14 +376,44 @@ impl State {
 
     /// Lay out the widgets and draw them. A failed frame keeps the last one; the next
     /// change tries again.
-    fn render(&self) {
+    fn render(&self, hwnd: HWND) {
         let (w, h) = self.size.get();
         self.tree.borrow_mut().layout(w, h, &self.formats);
+        if self.draw().is_err_and(|err| err.device_lost()) && self.renew_gpu(hwnd).is_ok() {
+            let _ = self.draw();
+        }
+    }
+
+    fn draw(&self) -> Result<()> {
         let tree = self.tree.borrow();
         let theme = self.theme.get();
-        let _ = self.scene.draw(self.scale.get(), |dc| {
+        let gpu = self.gpu.borrow();
+        let Some(gpu) = gpu.as_ref() else {
+            return Ok(());
+        };
+        gpu.scene.draw(self.scale.get(), |dc| {
             draw::paint(dc, &tree, &theme, &self.formats, self.now.get())
-        });
+        })
+    }
+
+    /// Make the GPU part again, after a device loss. The old one goes first, because a
+    /// window can have only one Composition target.
+    fn renew_gpu(&self, hwnd: HWND) -> Result<()> {
+        self.gpu.borrow_mut().take();
+        let gfx = Graphics::new()?;
+        let (w, h) = client_pixels(hwnd);
+        let scene = Scene::new(&gfx, hwnd, w, h)?;
+        *self.gpu.borrow_mut() = Some(Gpu { scene, _gfx: gfx });
+        self.applied.set(None);
+        self.apply_theme(hwnd);
+        Ok(())
+    }
+
+    /// Change the scene, if there is one. A failure keeps the scene as it was.
+    fn with_scene(&self, change: impl FnOnce(&Scene) -> Result<()>) {
+        if let Some(gpu) = self.gpu.borrow().as_ref() {
+            let _ = change(&gpu.scene);
+        }
     }
 
     /// Read the theme again, and show the background that fits it.
@@ -416,7 +451,7 @@ impl State {
         unsafe {
             let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
         }
-        let _ = self.scene.set_backdrop(backdrop, &theme);
+        self.with_scene(|scene| scene.set_backdrop(backdrop, &theme));
         true
     }
 
@@ -502,7 +537,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         match msg {
             WM_REDRAW => {
                 state.redraw_posted.set(false);
-                state.render();
+                state.render(hwnd);
                 LRESULT(0)
             }
             WM_PAINT => {
@@ -516,9 +551,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     let (w, h) = client_pixels(hwnd);
                     let s = state.scale.get();
                     state.size.set((w as f32 / s, h as f32 / s));
-                    let _ = state.scene.resize(w, h);
+                    state.with_scene(|scene| scene.resize(w, h));
                     // Draw now, so the window never shows a frame of the old size.
-                    state.render();
+                    state.render(hwnd);
                 }
                 LRESULT(0)
             }
@@ -537,7 +572,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let (w, h) = client_pixels(hwnd);
                 let s = state.scale.get();
                 state.size.set((w as f32 / s, h as f32 / s));
-                state.render();
+                state.render(hwnd);
                 LRESULT(0)
             }
             WM_GETMINMAXINFO => {
@@ -560,7 +595,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             | WM_DWMCOLORIZATIONCOLORCHANGED => {
                 // Windows sends these for many settings. Most of them do not change the look.
                 if state.apply_theme(hwnd) {
-                    state.render();
+                    state.render(hwnd);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
