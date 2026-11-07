@@ -37,6 +37,7 @@ thread_local! {
 pub(crate) enum Notice {
     Popup(u32),
     Dialog(u32),
+    Window(u32),
 }
 
 struct Inner {

@@ -42,8 +42,13 @@ pub struct PopupId(pub(crate) u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DialogId(pub(crate) u32);
 
+/// The id of a [`Window`](crate::window::Window), as [`Event::Window`] gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WindowId(pub(crate) u32);
+
 /// Something for the app. `C` is the command type of the trays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Event<C> {
     /// The user picked a command item of a tray menu.
     Command(C),
@@ -53,6 +58,9 @@ pub enum Event<C> {
     /// A dialog has events: call [`Dialog::next_event`](crate::dialog::Dialog::next_event) on
     /// the dialog with this id until it gives `None`.
     Dialog(DialogId),
+    /// A window has events: call [`Window::next_event`](crate::window::Window::next_event) on
+    /// the window with this id until it gives `None`.
+    Window(WindowId),
     /// The time given to [`EventLoop::next`] came.
     Deadline,
     /// The user unlocked the session: someone is at the screen again.
@@ -70,6 +78,7 @@ pub(crate) trait Source<C> {
 enum Ready {
     Popup(PopupId),
     Dialog(DialogId),
+    Window(WindowId),
     SessionUnlocked,
     Deadline,
 }
@@ -79,6 +88,7 @@ impl<C> From<Ready> for Event<C> {
         match ready {
             Ready::Popup(id) => Event::Popup(id),
             Ready::Dialog(id) => Event::Dialog(id),
+            Ready::Window(id) => Event::Window(id),
             Ready::SessionUnlocked => Event::SessionUnlocked,
             Ready::Deadline => Event::Deadline,
         }
@@ -170,6 +180,7 @@ impl Waiter {
         match self.ui.take_notice() {
             Some(Notice::Popup(id)) => return Ok(Some(Ready::Popup(PopupId(id)))),
             Some(Notice::Dialog(id)) => return Ok(Some(Ready::Dialog(DialogId(id)))),
+            Some(Notice::Window(id)) => return Ok(Some(Ready::Window(WindowId(id)))),
             None => {}
         }
         if self.window.state().replace(false) {

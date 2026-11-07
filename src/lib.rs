@@ -113,6 +113,8 @@ mod render;
 mod theme;
 pub mod tray;
 mod ui;
+pub mod widget;
+pub mod window;
 
 /// Runs the README example as a doc test.
 #[cfg(doctest)]
