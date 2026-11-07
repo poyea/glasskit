@@ -1,13 +1,22 @@
 // Copyright (c) 2026 John Law
 // SPDX-License-Identifier: MIT
 
-//! The colors of all glasskit windows. They follow the Windows light or dark app mode.
+//! The colors of all glasskit windows. They follow the Windows light or dark app mode, the
+//! accent color, high contrast, and the setting for transparency effects.
 
 use windows::UI::Color;
 use windows::Win32::Foundation::COLORREF;
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
+use windows::Win32::Graphics::Gdi::{
+    COLOR_BTNFACE, COLOR_BTNTEXT, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT,
+    COLOR_WINDOW, COLOR_WINDOWTEXT, GetSysColor, SYS_COLOR_INDEX,
+};
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
-use windows::core::w;
+use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
+use windows::Win32::UI::WindowsAndMessaging::{
+    SPI_GETHIGHCONTRAST, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
+};
+use windows::core::{PCWSTR, w};
 
 #[derive(Clone, Copy)]
 pub(crate) struct Theme {
@@ -25,7 +34,20 @@ pub(crate) struct Theme {
     pub bad: D2D1_COLOR_F,
     /// The background of an edit box or a list, over a card.
     pub field: D2D1_COLOR_F,
+    /// The accent color of the user, for a main button and the focus ring.
+    pub accent: D2D1_COLOR_F,
+    /// Text on the accent color.
+    pub on_accent: D2D1_COLOR_F,
+    /// A panel (card) on a window.
+    pub card: D2D1_COLOR_F,
+    pub card_border: D2D1_COLOR_F,
+    /// Text that is less important, or that is turned off.
+    pub subtle_text: D2D1_COLOR_F,
     pub dark: bool,
+    /// High contrast is on. Then all colors are system colors, and nothing is see-through.
+    pub high_contrast: bool,
+    /// The user allows transparency effects. Without them, a window has no glass.
+    pub transparency: bool,
 }
 
 pub(crate) const fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
@@ -49,7 +71,14 @@ impl Theme {
         good: rgba(0.30, 0.78, 0.42, 0.85),
         bad: rgba(0.94, 0.40, 0.40, 0.85),
         field: rgba(1.0, 1.0, 1.0, 1.0),
+        accent: rgba(0.0, 0.37, 0.72, 1.0),
+        on_accent: rgba(1.0, 1.0, 1.0, 1.0),
+        card: rgba(1.0, 1.0, 1.0, 0.7),
+        card_border: rgba(0.0, 0.0, 0.0, 0.06),
+        subtle_text: rgba(0.0, 0.0, 0.0, 0.6),
         dark: false,
+        high_contrast: false,
+        transparency: true,
     };
 
     const DARK: Theme = Theme {
@@ -68,28 +97,78 @@ impl Theme {
         good: rgba(0.13, 0.55, 0.27, 0.85),
         bad: rgba(0.72, 0.18, 0.18, 0.85),
         field: rgba(0.0, 0.0, 0.0, 0.3),
+        accent: rgba(0.38, 0.8, 1.0, 1.0),
+        on_accent: rgba(0.0, 0.0, 0.0, 1.0),
+        card: rgba(1.0, 1.0, 1.0, 0.05),
+        card_border: rgba(0.0, 0.0, 0.0, 0.1),
+        subtle_text: rgba(1.0, 1.0, 1.0, 0.6),
         dark: true,
+        high_contrast: false,
+        transparency: true,
     };
 
     pub fn current() -> Theme {
-        let mut value: u32 = 1;
-        let mut size = size_of::<u32>() as u32;
-        let status = unsafe {
-            RegGetValueW(
-                HKEY_CURRENT_USER,
-                w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
-                w!("AppsUseLightTheme"),
-                RRF_RT_REG_DWORD,
-                None,
-                Some(&mut value as *mut u32 as *mut _),
-                Some(&mut size),
-            )
-        };
-        if status.is_ok() && value == 0 {
+        if high_contrast_on() {
+            return Theme::high_contrast();
+        }
+        let mut theme = if personalize("AppsUseLightTheme") == Some(0) {
             Theme::DARK
         } else {
             Theme::LIGHT
+        };
+        theme.transparency = personalize("EnableTransparency") != Some(0);
+        if let Some(accent) = accent_color(theme.dark) {
+            theme.accent = accent;
         }
+        theme
+    }
+
+    /// The system colors of high contrast. Nothing is see-through.
+    fn high_contrast() -> Theme {
+        let system = |index: SYS_COLOR_INDEX| {
+            let c = unsafe { GetSysColor(index) };
+            rgba(
+                (c & 0xFF) as f32 / 255.0,
+                ((c >> 8) & 0xFF) as f32 / 255.0,
+                ((c >> 16) & 0xFF) as f32 / 255.0,
+                1.0,
+            )
+        };
+        let window = system(COLOR_WINDOW);
+        let text = system(COLOR_WINDOWTEXT);
+        let button = system(COLOR_BTNFACE);
+        let highlight = system(COLOR_HIGHLIGHT);
+        let byte = |v: f32| (v * 255.0).round() as u8;
+        Theme {
+            tint: Color {
+                A: 255,
+                R: byte(window.r),
+                G: byte(window.g),
+                B: byte(window.b),
+            },
+            text,
+            button,
+            button_hover: highlight,
+            button_pressed: highlight,
+            button_border: system(COLOR_BTNTEXT),
+            window_border: text,
+            good: highlight,
+            bad: highlight,
+            field: window,
+            accent: highlight,
+            on_accent: system(COLOR_HIGHLIGHTTEXT),
+            card: window,
+            card_border: text,
+            subtle_text: system(COLOR_GRAYTEXT),
+            dark: (window.r + window.g + window.b) < 1.5,
+            high_contrast: true,
+            transparency: false,
+        }
+    }
+
+    /// Whether windows can show glass with this theme.
+    pub fn glass(&self) -> bool {
+        self.transparency && !self.high_contrast
     }
 
     /// The window color without alpha, for a window that has no blur behind it.
@@ -102,6 +181,58 @@ impl Theme {
             1.0,
         )
     }
+}
+
+/// A value of the Personalize key of the current user.
+fn personalize(name: &str) -> Option<u32> {
+    let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    registry_dword(
+        w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+        PCWSTR(name.as_ptr()),
+    )
+}
+
+fn registry_dword(key: PCWSTR, name: PCWSTR) -> Option<u32> {
+    let mut value: u32 = 0;
+    let mut size = size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key,
+            name,
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut value as *mut u32 as *mut _),
+            Some(&mut size),
+        )
+    };
+    status.is_ok().then_some(value)
+}
+
+/// The accent color of the user. Windows keeps it as `0xAABBGGRR`. In dark mode, a lighter
+/// accent is easier to read, as Windows does.
+fn accent_color(dark: bool) -> Option<D2D1_COLOR_F> {
+    let abgr = registry_dword(w!("Software\\Microsoft\\Windows\\DWM"), w!("AccentColor"))?;
+    let channel = |shift: u32| ((abgr >> shift) & 0xFF) as f32 / 255.0;
+    let (r, g, b) = (channel(0), channel(8), channel(16));
+    let lift = |v: f32| if dark { v + (1.0 - v) * 0.45 } else { v };
+    Some(rgba(lift(r), lift(g), lift(b), 1.0))
+}
+
+fn high_contrast_on() -> bool {
+    let mut hc = HIGHCONTRASTW {
+        cbSize: size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            hc.cbSize,
+            Some(&mut hc as *mut _ as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    ok.is_ok() && hc.dwFlags.contains(HCF_HIGHCONTRASTON)
 }
 
 /// `top` with its alpha over the opaque `bottom`.
