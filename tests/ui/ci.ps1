@@ -173,6 +173,59 @@ Step 'dialog' {
     }
 }
 
+foreach ($material in @('mica', 'glass', 'solid')) {
+    Step "window $material" {
+        $p = Start-Process (Join-Path $bin 'window.exe') -ArgumentList $material -PassThru
+        try {
+            $hwnd = Find-Window $p 'GlasskitWindow'
+            Start-Sleep -Milliseconds 800
+            Save-Picture $hwnd "window-$material" -FromScreen
+        } finally {
+            Stop-App $p
+        }
+    }
+}
+
+Step 'window keyboard' {
+    # Only keys: Tab to "Add one" and Enter, then Tab twice to OK and Enter.
+    $log = Join-Path $Out 'window.txt'
+    $p = Start-Process (Join-Path $bin 'window.exe') -PassThru -RedirectStandardOutput $log
+    try {
+        $hwnd = Find-Window $p 'GlasskitWindow'
+        Start-Sleep -Milliseconds 500
+        $key = { param($vk) [GlassUi]::PostMessageW($hwnd, 0x0100, [IntPtr] $vk, [IntPtr]::Zero) | Out-Null }
+        & $key 0x09
+        Start-Sleep -Milliseconds 300
+        Save-Picture $hwnd 'window-focus' -FromScreen
+        & $key 0x0D
+        & $key 0x09
+        & $key 0x09
+        & $key 0x0D
+        if (-not $p.WaitForExit(5000)) { throw 'The window did not end on OK.' }
+        $lines = @(Get-Content $log)
+        if (($lines -join '|') -ne 'count 1|ok') { throw "The app printed '$($lines -join '|')', not 'count 1|ok'." }
+    } finally {
+        Stop-App $p
+    }
+}
+
+Step 'window idle CPU' {
+    $p = Start-Process (Join-Path $bin 'window.exe') -PassThru
+    try {
+        Find-Window $p 'GlasskitWindow' | Out-Null
+        Start-Sleep -Seconds 3
+        $p.Refresh()
+        $before = $p.TotalProcessorTime.TotalSeconds
+        Start-Sleep -Seconds 20
+        $p.Refresh()
+        $used = $p.TotalProcessorTime.TotalSeconds - $before
+        Write-Host ("window idle CPU: {0:N3} s in 20 s" -f $used)
+        if ($used -gt $IdleCpuSeconds) { throw ("The idle window used {0:N3} s of CPU." -f $used) }
+    } finally {
+        Stop-App $p
+    }
+}
+
 Step 'idle CPU' {
     # The quiz asks after 60 seconds, so the window below has no popup.
     $p = Start-Process (Join-Path $bin 'quiz.exe') -PassThru
