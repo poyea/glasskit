@@ -103,6 +103,7 @@ pub mod autostart;
 pub mod dialog;
 pub mod error;
 pub mod events;
+mod handle;
 pub mod layout;
 mod native;
 pub mod placement;

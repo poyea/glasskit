@@ -5,7 +5,7 @@
 //! columns, and stacks that place them.
 //!
 //! Make a widget with its builder, give it to [`Window::add`](crate::window::Window::add),
-//! and keep the [`WidgetId`] that it gives. A container takes the ids of its children. Then
+//! and keep the [`Id`] that it gives. A container takes the ids of its children. Then
 //! give the outer container to [`Window::set_root`](crate::window::Window::set_root).
 //!
 //! Sizes are in device-independent pixels (DIPs): one DIP is one pixel at 100% display
@@ -16,9 +16,11 @@ use std::marker::PhantomData;
 
 pub(crate) mod tree;
 
+pub use crate::handle::{AnyId, Id};
+
 use tree::{Axis, Container, Content, Node};
 
-/// The kinds of widgets. They are the type parameter of [`WidgetId`].
+/// The kinds of widgets. They are the type parameter of [`Id`].
 pub mod kind {
     /// A [`Text`](super::Text).
     #[derive(Debug)]
@@ -53,72 +55,6 @@ mod sealed {
 pub trait HasText: sealed::Sealed {}
 impl HasText for kind::Text {}
 impl HasText for kind::Button {}
-
-/// A handle to a widget of kind `K` in one window.
-pub struct WidgetId<K> {
-    pub(crate) index: usize,
-    kind: PhantomData<fn() -> K>,
-}
-
-impl<K> WidgetId<K> {
-    pub(crate) fn new(index: usize) -> Self {
-        Self {
-            index,
-            kind: PhantomData,
-        }
-    }
-}
-
-impl<K> Clone for WidgetId<K> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<K> Copy for WidgetId<K> {}
-
-impl<K> PartialEq for WidgetId<K> {
-    fn eq(&self, other: &Self) -> bool {
-        self.index == other.index
-    }
-}
-
-impl<K> Eq for WidgetId<K> {}
-
-impl<K> std::hash::Hash for WidgetId<K> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.index.hash(state);
-    }
-}
-
-impl<K> fmt::Debug for WidgetId<K> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "WidgetId({})", self.index)
-    }
-}
-
-/// A handle to a widget of any kind, as events give it. It compares equal to the
-/// [`WidgetId`] of the same widget.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AnyWidget(pub(crate) usize);
-
-impl<K> From<WidgetId<K>> for AnyWidget {
-    fn from(id: WidgetId<K>) -> Self {
-        AnyWidget(id.index)
-    }
-}
-
-impl<K> PartialEq<WidgetId<K>> for AnyWidget {
-    fn eq(&self, other: &WidgetId<K>) -> bool {
-        self.0 == other.index
-    }
-}
-
-impl<K> PartialEq<AnyWidget> for WidgetId<K> {
-    fn eq(&self, other: &AnyWidget) -> bool {
-        self.index == other.0
-    }
-}
 
 /// The width or the height of a widget.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -265,17 +201,14 @@ macro_rules! container {
         /// Add a child at the end. A widget is in one container at a time: adding it to a
         /// second container moves it.
         #[must_use]
-        pub fn child(mut self, child: impl Into<AnyWidget>) -> Self {
+        pub fn child(mut self, child: impl Into<AnyId>) -> Self {
             self.container_mut().children.push(child.into().0);
             self
         }
 
         /// Add children at the end, in order.
         #[must_use]
-        pub fn children<I: IntoIterator<Item = A>, A: Into<AnyWidget>>(
-            mut self,
-            children: I,
-        ) -> Self {
+        pub fn children<I: IntoIterator<Item = A>, A: Into<AnyId>>(mut self, children: I) -> Self {
             let list = &mut self.container_mut().children;
             list.extend(children.into_iter().map(|c| c.into().0));
             self

@@ -7,8 +7,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::fmt;
-use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::error::{Call, Result};

@@ -3,7 +3,7 @@
 
 //! The public types of a dialog: bounds, typed handles of controls, and events.
 
-use super::*;
+pub use crate::handle::{AnyId, Id};
 
 /// A position and size in pixels at 100% display scale. The dialog scales them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +31,7 @@ impl Bounds {
 }
 
 /// The kinds of controls. They are the type parameter of [`Id`], and they decide which
-/// [`Dialog`] methods an id can go to.
+/// [`Dialog`](crate::dialog::Dialog) methods an id can go to.
 pub mod kind {
     /// A text that the user cannot change.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,9 +54,9 @@ pub mod kind {
     /// A push button.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Button {}
-    /// A picker for where a window shows on the screen. See [`Dialog::add_placement_picker`].
+    /// A picker for where a window shows on the screen. See [`Dialog::add_placement_picker`](crate::dialog::Dialog::add_placement_picker).
     ///
-    /// [`Dialog::add_placement_picker`]: super::Dialog::add_placement_picker
+    /// [`Dialog::add_placement_picker`](crate::dialog::Dialog::add_placement_picker): super::Dialog::add_placement_picker
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum PlacementPicker {}
 }
@@ -83,71 +83,6 @@ impl HasItems for kind::DropDown {}
 
 impl HasItems for kind::List {}
 
-/// A control in a [`Dialog`]. The kind `K` decides which methods take it.
-pub struct Id<K> {
-    pub(super) index: usize,
-    pub(super) kind: PhantomData<fn() -> K>,
-}
-
-impl<K> Id<K> {
-    pub(super) fn new(index: usize) -> Self {
-        Self {
-            index,
-            kind: PhantomData,
-        }
-    }
-}
-
-impl<K> Clone for Id<K> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<K> Copy for Id<K> {}
-
-impl<K> PartialEq for Id<K> {
-    fn eq(&self, other: &Self) -> bool {
-        self.index == other.index
-    }
-}
-
-impl<K> Eq for Id<K> {}
-
-impl<K> std::hash::Hash for Id<K> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.index.hash(state);
-    }
-}
-
-impl<K> fmt::Debug for Id<K> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Id({})", self.index)
-    }
-}
-
-/// A control of any kind, as an [`Event`] names it. Compare it with an [`Id`] of any kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AnyId(pub(super) usize);
-
-impl<K> From<Id<K>> for AnyId {
-    fn from(id: Id<K>) -> Self {
-        AnyId(id.index)
-    }
-}
-
-impl<K> PartialEq<Id<K>> for AnyId {
-    fn eq(&self, other: &Id<K>) -> bool {
-        self.0 == other.index
-    }
-}
-
-impl<K> PartialEq<AnyId> for Id<K> {
-    fn eq(&self, other: &AnyId) -> bool {
-        self.index == other.0
-    }
-}
-
 /// How an edit box takes text.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EditStyle {
@@ -159,12 +94,12 @@ pub struct EditStyle {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// What the user did. [`Dialog::run`] gives events to its handler one at a time.
+/// What the user did. [`Dialog::run`](crate::dialog::Dialog::run) gives events to its handler one at a time.
 pub enum Event {
     /// A button or a check box was clicked.
     Clicked(AnyId),
     /// The user changed the text of an edit box or the selection of a list.
-    /// Changes made through [`Dialog`] methods do not send this event.
+    /// Changes made through [`Dialog`](crate::dialog::Dialog) methods do not send this event.
     Changed(AnyId),
     /// The user pressed Enter outside a multiline edit box.
     Submit,
@@ -173,16 +108,16 @@ pub enum Event {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// What the handler of [`Dialog::run`] wants next.
+/// What the handler of [`Dialog::run`](crate::dialog::Dialog::run) wants next.
 pub enum Flow {
     /// Keep the dialog open and wait for the next event.
     Continue,
-    /// Close the dialog. [`Dialog::run`] then returns [`Outcome::Closed`].
+    /// Close the dialog. [`Dialog::run`](crate::dialog::Dialog::run) then returns [`Outcome::Closed`].
     Close,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-/// How [`Dialog::run`] ended.
+/// How [`Dialog::run`](crate::dialog::Dialog::run) ended.
 pub enum Outcome {
     /// The handler returned [`Flow::Close`].
     Closed,

@@ -83,7 +83,7 @@ use crate::render::Graphics;
 use crate::theme::Theme;
 use crate::ui::Notice;
 use crate::widget::tree::{Content, Tree};
-use crate::widget::{AnyWidget, Element, HasText, WidgetId};
+use crate::widget::{AnyId, Element, HasText, Id};
 use draw::{Formats, Interaction};
 use scene::{Backdrop, Scene};
 
@@ -113,7 +113,7 @@ pub enum Material {
 #[non_exhaustive]
 pub enum WindowEvent {
     /// The user clicked a button, or pressed Space or Enter on it.
-    Clicked(AnyWidget),
+    Clicked(AnyId),
     /// The user clicked the close button or pressed Alt+F4. The window stays until the app
     /// drops it.
     CloseRequested,
@@ -250,14 +250,14 @@ impl Window {
     }
 
     /// Add a widget, and give its id. It shows when it is in the tree under the root.
-    pub fn add<K>(&mut self, element: impl Into<Element<K>>) -> WidgetId<K> {
+    pub fn add<K>(&mut self, element: impl Into<Element<K>>) -> Id<K> {
         let index = self.state().tree.borrow_mut().add(element.into().node);
         self.state().invalidate(self.hwnd());
-        WidgetId::new(index)
+        Id::new(index)
     }
 
     /// The widget that fills the window. Its children, and their children, show.
-    pub fn set_root(&mut self, root: impl Into<AnyWidget>) {
+    pub fn set_root(&mut self, root: impl Into<AnyId>) {
         let root = root.into().0;
         {
             let mut tree = self.state().tree.borrow_mut();
@@ -269,7 +269,7 @@ impl Window {
     }
 
     /// The text of a text or the label of a button.
-    pub fn text<K: HasText>(&self, id: WidgetId<K>) -> String {
+    pub fn text<K: HasText>(&self, id: Id<K>) -> String {
         match self.state().tree.borrow().get(id.index).map(|n| &n.content) {
             Some(Content::Text { text, .. }) => text.clone(),
             Some(Content::Button { label, .. }) => label.clone(),
@@ -278,7 +278,7 @@ impl Window {
     }
 
     /// Change the text of a text, or the label of a button.
-    pub fn set_text<K: HasText>(&mut self, id: WidgetId<K>, value: &str) {
+    pub fn set_text<K: HasText>(&mut self, id: Id<K>, value: &str) {
         if let Some(node) = self.state().tree.borrow_mut().get_mut(id.index) {
             match &mut node.content {
                 Content::Text { text, .. } => *text = value.to_string(),
@@ -290,7 +290,7 @@ impl Window {
     }
 
     /// Turn a widget on or off. A button that is off takes no clicks and no focus.
-    pub fn set_enabled(&mut self, id: impl Into<AnyWidget>, enabled: bool) {
+    pub fn set_enabled(&mut self, id: impl Into<AnyId>, enabled: bool) {
         let index = id.into().0;
         if let Some(node) = self.state().tree.borrow_mut().get_mut(index) {
             node.enabled = enabled;
@@ -304,7 +304,7 @@ impl Window {
     }
 
     /// Give the keyboard focus to a widget that can take it.
-    pub fn focus(&mut self, id: impl Into<AnyWidget>) {
+    pub fn focus(&mut self, id: impl Into<AnyId>) {
         let index = id.into().0;
         if self.state().tree.borrow().focusable(index) {
             let mut now = self.state().now.get();
@@ -489,7 +489,7 @@ impl State {
                 let focus = self.now.get().focus;
                 if let Some(focus) = focus.filter(|&f| self.tree.borrow().focusable(f)) {
                     self.set_interaction(hwnd, |now| now.cues = true);
-                    self.push(WindowEvent::Clicked(AnyWidget(focus)));
+                    self.push(WindowEvent::Clicked(AnyId(focus)));
                 }
                 true
             }
@@ -638,7 +638,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 if let Some(p) = pressed
                     && hit == Some(p)
                 {
-                    state.push(WindowEvent::Clicked(AnyWidget(p)));
+                    state.push(WindowEvent::Clicked(AnyId(p)));
                 }
                 LRESULT(0)
             }
