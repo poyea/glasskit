@@ -5,10 +5,16 @@
 //! window code. Text sizes come from a [`Measure`], so tests can use simple numbers.
 
 use super::{Align, Insets, Length, TextStyle};
+use crate::edit::Editor;
 
 /// The inner space of a button around its label, in DIPs.
 const BUTTON_PADDING: (f32, f32) = (12.0, 6.0);
 const BUTTON_MIN: (f32, f32) = (64.0, 32.0);
+/// The inner space of a text box around its text, in DIPs. It includes the border.
+pub(crate) const TEXT_BOX_PADDING: (f32, f32) = (11.0, 6.0);
+/// The width of a text box with [`Length::Auto`], in DIPs.
+const TEXT_BOX_WIDTH: f32 = 200.0;
+const TEXT_BOX_MIN_HEIGHT: f32 = 32.0;
 
 /// A rectangle in DIPs.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -58,11 +64,17 @@ pub(crate) enum Content {
     },
     /// A panel behind the children.
     Card,
+    TextBox {
+        edit: Editor,
+        placeholder: String,
+        /// How far the text is scrolled: to the left with one line, up with many lines.
+        scroll: f32,
+    },
 }
 
 impl Content {
     pub fn interactive(&self) -> bool {
-        matches!(self, Content::Button { .. })
+        matches!(self, Content::Button { .. } | Content::TextBox { .. })
     }
 }
 
@@ -417,6 +429,19 @@ fn intrinsic(content: &Content, max_w: f32, m: &dyn Measure) -> (f32, f32) {
                 (h + 2.0 * BUTTON_PADDING.1).max(BUTTON_MIN.1),
             )
         }
+        Content::TextBox { edit, .. } => {
+            let (px, py) = TEXT_BOX_PADDING;
+            // A box with many lines grows with its text. An empty box has one line.
+            let (sample, wrap) = match edit.text() {
+                text if edit.multiline() && !text.is_empty() => (text, max_w - 2.0 * px),
+                _ => (" ", f32::MAX / 4.0),
+            };
+            let (_, h) = m.text(sample, TextStyle::Body, wrap.max(1.0));
+            (
+                TEXT_BOX_WIDTH.min(max_w),
+                (h + 2.0 * py).max(TEXT_BOX_MIN_HEIGHT),
+            )
+        }
     }
 }
 
@@ -602,6 +627,34 @@ mod tests {
             &[a, b, a],
         ));
         assert_eq!(t.nodes[col].children(), [a, b]);
+    }
+
+    fn text_box(text: &str, multiline: bool) -> Node {
+        let mut edit = Editor::new(multiline, usize::MAX);
+        edit.set_text(text);
+        Node::leaf(Content::TextBox {
+            edit,
+            placeholder: String::new(),
+            scroll: 0.0,
+        })
+    }
+
+    #[test]
+    fn a_text_box_takes_focus_and_grows_with_many_lines() {
+        let mut t = Tree::default();
+        let one = t.add(text_box("abcdefghij", false));
+        let many = t.add(text_box("abcdefghij", true));
+        let col = t.add(with(
+            Node::container(Content::Blank, Axis::Column, Align::Start),
+            &[one, many],
+        ));
+        t.root = Some(col);
+        t.layout(60.0, 300.0, &Fixed);
+        assert_eq!(t.focus_order(), [one, many]);
+        // One line: 20 + 2 * 6 padding, at least 32.
+        assert_eq!(t.nodes[one].rect, Rect::new(0.0, 0.0, 60.0, 32.0));
+        // 60 - 2 * 11 = 38 DIPs for text: 4 characters a line, so 3 lines.
+        assert_eq!(t.nodes[many].rect.h, 72.0);
     }
 
     #[test]

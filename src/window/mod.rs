@@ -49,33 +49,42 @@
 
 mod draw;
 mod scene;
+mod text_box;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWM_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea,
 };
-use windows::Win32::Graphics::Gdi::ValidateRect;
+use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
+use windows::Win32::UI::Input::Ime::{
+    CFS_POINT, COMPOSITIONFORM, ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB,
+    GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN,
+    VK_END, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, GetClientRect, IDC_ARROW, MINMAXINFO,
-    PostMessageW, SIZE_MINIMIZED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, SetWindowPos,
-    SetWindowTextW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CLOSE,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED,
-    WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, HTCLIENT,
+    IDC_ARROW, IDC_IBEAM, LoadCursorW, MINMAXINFO, PostMessageW, SIZE_MINIMIZED, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetWindowPos, SetWindowTextW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DPICHANGED, WM_ERASEBKGND,
+    WM_GETMINMAXINFO, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WS_EX_APPWINDOW,
+    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::Ui;
+use crate::clipboard;
+use crate::edit::Editor;
 use crate::error::{Call, Result};
 use crate::events::WindowId;
 use crate::native::{self, NativeWindow, state_of};
@@ -86,6 +95,7 @@ use crate::widget::tree::{Content, Tree};
 use crate::widget::{AnyId, Element, HasText, Id};
 use draw::{Formats, Interaction};
 use scene::{Backdrop, Scene};
+use text_box::Field;
 
 const CLASS_NAME: PCWSTR = w!("GlasskitWindow");
 /// A private message: draw the window again, once for many changes.
@@ -114,6 +124,10 @@ pub enum Material {
 pub enum WindowEvent {
     /// The user clicked a button, or pressed Space or Enter on it.
     Clicked(AnyId),
+    /// The user changed the text of a text box. Many changes in a row give one event.
+    Changed(AnyId),
+    /// The user pressed Enter in a text box with one line.
+    Submitted(AnyId),
     /// The user clicked the close button or pressed Alt+F4. The window stays until the app
     /// drops it.
     CloseRequested,
@@ -148,6 +162,8 @@ struct State {
     now: Cell<Interaction>,
     tracking: Cell<bool>,
     redraw_posted: Cell<bool>,
+    /// Scroll the focused text box to its caret at the next layout.
+    reveal: Cell<bool>,
     /// The theme and material that the background shows now.
     applied: Cell<Option<(Theme, Material)>>,
 }
@@ -217,6 +233,7 @@ impl Window {
             now: Cell::new(Interaction::default()),
             tracking: Cell::new(false),
             redraw_posted: Cell::new(false),
+            reveal: Cell::new(false),
             applied: Cell::new(None),
         };
         let native = NativeWindow::attach(hwnd, Rc::new(state));
@@ -268,21 +285,27 @@ impl Window {
         self.state().invalidate(self.hwnd());
     }
 
-    /// The text of a text or the label of a button.
+    /// The text of a text or a text box, or the label of a button.
     pub fn text<K: HasText>(&self, id: Id<K>) -> String {
         match self.state().tree.borrow().get(id.index).map(|n| &n.content) {
             Some(Content::Text { text, .. }) => text.clone(),
             Some(Content::Button { label, .. }) => label.clone(),
+            Some(Content::TextBox { edit, .. }) => edit.text().to_string(),
             _ => String::new(),
         }
     }
 
-    /// Change the text of a text, or the label of a button.
+    /// Change the text of a text or a text box, or the label of a button. A change here
+    /// gives no [`WindowEvent::Changed`].
     pub fn set_text<K: HasText>(&mut self, id: Id<K>, value: &str) {
         if let Some(node) = self.state().tree.borrow_mut().get_mut(id.index) {
             match &mut node.content {
                 Content::Text { text, .. } => *text = value.to_string(),
                 Content::Button { label, .. } => *label = value.to_string(),
+                Content::TextBox { edit, scroll, .. } => {
+                    edit.set_text(value);
+                    *scroll = 0.0;
+                }
                 _ => {}
             }
         }
@@ -361,7 +384,12 @@ impl std::fmt::Debug for Window {
 
 impl State {
     fn push(&self, event: WindowEvent) {
-        self.events.borrow_mut().push_back(event);
+        let mut events = self.events.borrow_mut();
+        if matches!(event, WindowEvent::Changed(_)) && events.back() == Some(&event) {
+            return;
+        }
+        events.push_back(event);
+        drop(events);
         crate::ui::notify(Notice::Window(self.id));
     }
 
@@ -379,6 +407,9 @@ impl State {
     fn render(&self, hwnd: HWND) {
         let (w, h) = self.size.get();
         self.tree.borrow_mut().layout(w, h, &self.formats);
+        if self.reveal.take() {
+            self.reveal_caret();
+        }
         if self.draw().is_err_and(|err| err.device_lost()) && self.renew_gpu(hwnd).is_ok() {
             let _ = self.draw();
         }
@@ -456,11 +487,11 @@ impl State {
     }
 
     fn set_interaction(&self, hwnd: HWND, change: impl FnOnce(&mut Interaction)) {
-        let mut now = self.now.get();
-        let before = (now.hover, now.pressed, now.focus, now.cues);
+        let before = self.now.get();
+        let mut now = before;
         change(&mut now);
         self.now.set(now);
-        if before != (now.hover, now.pressed, now.focus, now.cues) {
+        if before != now {
             self.invalidate(hwnd);
         }
     }
@@ -474,6 +505,12 @@ impl State {
 
     /// Handle a key. `repeat` is true for the messages that a held key sends again.
     fn key(&self, hwnd: HWND, key: u16, repeat: bool) -> bool {
+        // A text box takes all keys but Tab.
+        if key != VK_TAB.0
+            && let Some(index) = self.focused_box()
+        {
+            return self.box_key(hwnd, index, VIRTUAL_KEY(key), repeat);
+        }
         match key {
             k if k == VK_TAB.0 => {
                 let back = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
@@ -494,6 +531,245 @@ impl State {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// The text box that has the focus, if one has it.
+    fn focused_box(&self) -> Option<usize> {
+        let focus = self.now.get().focus?;
+        self.is_box(focus).then_some(focus)
+    }
+
+    fn is_box(&self, index: usize) -> bool {
+        let tree = self.tree.borrow();
+        tree.focusable(index) && matches!(tree.nodes[index].content, Content::TextBox { .. })
+    }
+
+    /// The text of a text box, laid out where it shows.
+    fn field(&self, index: usize) -> Option<Field> {
+        let tree = self.tree.borrow();
+        let node = tree.get(index)?;
+        let Content::TextBox { edit, scroll, .. } = &node.content else {
+            return None;
+        };
+        Field::new(
+            &self.formats,
+            node.rect,
+            edit.text(),
+            edit.multiline(),
+            *scroll,
+        )
+        .ok()
+    }
+
+    /// Change a text box with `change`, which gives whether the caret or the selection
+    /// moved. Then draw again, and tell the app when the text changed.
+    fn edit_box(
+        &self,
+        hwnd: HWND,
+        index: usize,
+        change: impl FnOnce(&mut Editor, Option<&Field>) -> bool,
+    ) {
+        let field = self.field(index);
+        let (moved, changed) = {
+            let mut tree = self.tree.borrow_mut();
+            let Some(Content::TextBox { edit, .. }) = tree.get_mut(index).map(|n| &mut n.content)
+            else {
+                return;
+            };
+            let before = edit.revision();
+            let moved = change(edit, field.as_ref());
+            (moved, edit.revision() != before)
+        };
+        if moved || changed {
+            self.reveal.set(true);
+            self.invalidate(hwnd);
+        }
+        if changed {
+            self.push(WindowEvent::Changed(AnyId(index)));
+        }
+    }
+
+    /// Read the editor of a text box.
+    fn read_box<R>(&self, index: usize, read: impl FnOnce(&Editor) -> R) -> Option<R> {
+        match &self.tree.borrow().get(index)?.content {
+            Content::TextBox { edit, .. } => Some(read(edit)),
+            _ => None,
+        }
+    }
+
+    /// Handle a key in a text box. It gives false for keys that the box does not take.
+    fn box_key(&self, hwnd: HWND, index: usize, key: VIRTUAL_KEY, repeat: bool) -> bool {
+        let down = |k: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(k.0)) } < 0;
+        let (ctrl, shift) = (down(VK_CONTROL), down(VK_SHIFT));
+        let multiline = self.read_box(index, Editor::multiline).unwrap_or(false);
+        // Move to a position from the layout: a line up or down, or a line edge.
+        let to_line = |e: &mut Editor, f: Option<&Field>, at: &dyn Fn(&Field, u32) -> u32| {
+            let Some(f) = f else {
+                return false;
+            };
+            let to = e.byte_at(at(f, e.utf16_at(e.caret())));
+            e.move_to(to, shift)
+        };
+        match key {
+            VK_LEFT => self.edit_box(hwnd, index, |e, _| e.left(ctrl, shift)),
+            VK_RIGHT => self.edit_box(hwnd, index, |e, _| e.right(ctrl, shift)),
+            VK_UP | VK_DOWN if multiline => self.edit_box(hwnd, index, |e, f| {
+                to_line(e, f, &|f, at| f.vertical(at, key == VK_DOWN))
+            }),
+            VK_HOME | VK_END if ctrl || !multiline => {
+                let to = if key == VK_HOME { 0 } else { usize::MAX };
+                self.edit_box(hwnd, index, |e, _| e.move_to(to, shift));
+            }
+            VK_HOME | VK_END => self.edit_box(hwnd, index, |e, f| {
+                to_line(e, f, &|f, at| f.line_edge(at, key == VK_END))
+            }),
+            VK_BACK => self.edit_box(hwnd, index, |e, _| e.backspace(ctrl)),
+            VK_DELETE => self.edit_box(hwnd, index, |e, _| e.delete(ctrl)),
+            VK_RETURN if multiline => self.edit_box(hwnd, index, |e, _| e.insert("\n")),
+            VK_RETURN => {
+                if !repeat {
+                    self.push(WindowEvent::Submitted(AnyId(index)));
+                }
+            }
+            _ if !ctrl => return false,
+            VIRTUAL_KEY(k) => match u8::try_from(k).map(char::from) {
+                Ok('A') => self.edit_box(hwnd, index, |e, _| e.select_all()),
+                Ok('C') => {
+                    if let Some(text) = self.selected(index) {
+                        clipboard::set_text(hwnd, &text);
+                    }
+                }
+                Ok('X') => {
+                    if let Some(text) = self.selected(index)
+                        && clipboard::set_text(hwnd, &text)
+                    {
+                        self.edit_box(hwnd, index, |e, _| e.cut().is_some());
+                    }
+                }
+                Ok('V') => {
+                    if let Some(text) = clipboard::text(hwnd) {
+                        self.edit_box(hwnd, index, |e, _| e.insert(&text));
+                    }
+                }
+                Ok('Z') if shift => self.edit_box(hwnd, index, |e, _| e.redo()),
+                Ok('Z') => self.edit_box(hwnd, index, |e, _| e.undo()),
+                Ok('Y') => self.edit_box(hwnd, index, |e, _| e.redo()),
+                _ => return false,
+            },
+        }
+        true
+    }
+
+    /// The selected text of a text box, if some is selected.
+    fn selected(&self, index: usize) -> Option<String> {
+        self.read_box(index, |e| e.selected_text().to_string())
+            .filter(|text| !text.is_empty())
+    }
+
+    /// Handle one `WM_CHAR`. It gives false when no text box has the focus.
+    fn type_char(&self, hwnd: HWND, unit: u16) -> bool {
+        let Some(index) = self.focused_box() else {
+            return false;
+        };
+        // Control characters come with keys that `box_key` handles.
+        if unit >= 0x20 && unit != 0x7F {
+            self.edit_box(hwnd, index, |e, _| e.type_unit(unit));
+        }
+        true
+    }
+
+    /// Put the caret of a text box at a point. With `extend`, select up to the point.
+    fn place_caret(&self, hwnd: HWND, index: usize, (x, y): (f32, f32), extend: bool) {
+        self.edit_box(hwnd, index, |e, f| match f {
+            Some(f) => {
+                let to = e.byte_at(f.hit(x, y));
+                e.move_to(to, extend)
+            }
+            None => false,
+        });
+    }
+
+    /// Scroll the focused text box, so its caret shows.
+    fn reveal_caret(&self) {
+        let Some(index) = self.focused_box() else {
+            return;
+        };
+        let Some(field) = self.field(index) else {
+            return;
+        };
+        if let Some(Content::TextBox { edit, scroll, .. }) = self
+            .tree
+            .borrow_mut()
+            .get_mut(index)
+            .map(|n| &mut n.content)
+        {
+            *scroll = field.reveal(edit.utf16_at(edit.caret()), *scroll);
+        }
+    }
+
+    /// Scroll a text box with many lines for the mouse wheel. It gives false when the
+    /// widget at the point is not such a box.
+    fn wheel(&self, hwnd: HWND, (x, y): (f32, f32), delta: f32) -> bool {
+        let Some(index) = self.tree.borrow().hit(x, y) else {
+            return false;
+        };
+        if !self.is_box(index) || self.read_box(index, Editor::multiline) != Some(true) {
+            return false;
+        }
+        let Some(field) = self.field(index) else {
+            return false;
+        };
+        // Three lines for each notch of the wheel, as Windows does by default.
+        let step = delta / 120.0 * 3.0 * field.line_height();
+        if let Some(Content::TextBox { scroll, .. }) = self
+            .tree
+            .borrow_mut()
+            .get_mut(index)
+            .map(|n| &mut n.content)
+        {
+            *scroll = (*scroll - step).clamp(0.0, field.max_scroll());
+        }
+        self.invalidate(hwnd);
+        true
+    }
+
+    /// A point on the screen, in DIPs in the client area.
+    fn screen_point(&self, hwnd: HWND, mut p: POINT) -> (f32, f32) {
+        unsafe {
+            let _ = ScreenToClient(hwnd, &mut p);
+        }
+        let s = self.scale.get();
+        (p.x as f32 / s, p.y as f32 / s)
+    }
+
+    /// Show the text that an input method makes at the caret of the focused text box.
+    fn place_ime(&self, hwnd: HWND) {
+        let Some(index) = self.focused_box() else {
+            return;
+        };
+        let (Some(field), Some(at)) = (
+            self.field(index),
+            self.read_box(index, |e| e.utf16_at(e.caret())),
+        ) else {
+            return;
+        };
+        let (x, y, _) = field.caret(at);
+        let s = self.scale.get();
+        let form = COMPOSITIONFORM {
+            dwStyle: CFS_POINT,
+            ptCurrentPos: POINT {
+                x: (x * s).round() as i32,
+                y: (y * s).round() as i32,
+            },
+            rcArea: RECT::default(),
+        };
+        unsafe {
+            let context = ImmGetContext(hwnd);
+            if !context.is_invalid() {
+                let _ = ImmSetCompositionWindow(context, &form);
+                let _ = ImmReleaseContext(hwnd, context);
+            }
         }
     }
 }
@@ -603,9 +879,13 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 if !state.tracking.get() {
                     state.tracking.set(native::track_leave(hwnd));
                 }
-                let (x, y) = state.point(lparam);
-                let hit = state.tree.borrow().hit(x, y);
+                let point = state.point(lparam);
+                let hit = state.tree.borrow().hit(point.0, point.1);
                 state.set_interaction(hwnd, |now| now.hover = hit);
+                // A drag from a text box selects text.
+                if let Some(p) = state.now.get().pressed.filter(|&p| state.is_box(p)) {
+                    state.place_caret(hwnd, p, point, true);
+                }
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
@@ -614,8 +894,8 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
-                let (x, y) = state.point(lparam);
-                let hit = state.tree.borrow().hit(x, y);
+                let point = state.point(lparam);
+                let hit = state.tree.borrow().hit(point.0, point.1);
                 if hit.is_some() {
                     SetCapture(hwnd);
                 }
@@ -627,6 +907,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                         now.cues = false;
                     }
                 });
+                if let Some(h) = hit.filter(|&h| state.is_box(h)) {
+                    let shift = GetKeyState(i32::from(VK_SHIFT.0)) < 0;
+                    state.place_caret(hwnd, h, point, shift);
+                }
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -637,6 +921,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let _ = ReleaseCapture();
                 if let Some(p) = pressed
                     && hit == Some(p)
+                    && !state.is_box(p)
                 {
                     state.push(WindowEvent::Clicked(AnyId(p)));
                 }
@@ -645,6 +930,39 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_CAPTURECHANGED => {
                 state.set_interaction(hwnd, |now| now.pressed = None);
                 LRESULT(0)
+            }
+            // A posted WM_CHAR also counts, so a test can type.
+            WM_CHAR if state.type_char(hwnd, wparam.0 as u16) => LRESULT(0),
+            WM_SETFOCUS | WM_KILLFOCUS => {
+                state.set_interaction(hwnd, |now| now.active = msg == WM_SETFOCUS);
+                LRESULT(0)
+            }
+            WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
+                let mut p = POINT::default();
+                let _ = GetCursorPos(&mut p);
+                let (x, y) = state.screen_point(hwnd, p);
+                let hit = state.tree.borrow().hit(x, y);
+                if hit.is_some_and(|h| state.is_box(h))
+                    && let Ok(beam) = LoadCursorW(None, IDC_IBEAM)
+                {
+                    SetCursor(Some(beam));
+                    return LRESULT(1);
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_MOUSEWHEEL => {
+                let (x, y) = native::point(lparam);
+                let point = state.screen_point(hwnd, POINT { x, y });
+                let delta = f32::from((wparam.0 >> 16) as u16 as i16);
+                if state.wheel(hwnd, point, delta) {
+                    LRESULT(0)
+                } else {
+                    DefWindowProcW(hwnd, msg, wparam, lparam)
+                }
+            }
+            WM_IME_STARTCOMPOSITION => {
+                state.place_ime(hwnd);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_KEYDOWN => {
                 // Bit 30 is set when the key was down before this message.

@@ -29,7 +29,7 @@ use windows_numerics::Vector2;
 
 use super::countdown::{self, Countdown};
 use super::glass::Scene;
-use super::input::{Frame, TextBox, clipboard_text};
+use super::input::{Frame, TextBox};
 use super::layout::{Fonts, Layout};
 use super::{Image, Mark, PopupStyle, Prompt, Reply, Response};
 use crate::error::{Call, Result};
@@ -301,7 +301,7 @@ impl WindowState {
                 return;
             }
             BACKSPACE => input.borrow_mut().backspace(),
-            PASTE => match clipboard_text(hwnd) {
+            PASTE => match crate::clipboard::text(hwnd) {
                 Some(text) => input.borrow_mut().insert(&text),
                 None => false,
             },

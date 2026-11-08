@@ -14,6 +14,7 @@ use windows::Win32::Graphics::DirectWrite::{
 };
 use windows_numerics::Vector2;
 
+use super::text_box;
 use crate::error::{Call, Result};
 use crate::render::{self, Graphics};
 use crate::theme::Theme;
@@ -26,10 +27,12 @@ const FOCUS_GAP: f32 = 3.0;
 const FOCUS_WIDTH: f32 = 2.0;
 
 pub(super) struct Formats {
-    dwrite: IDWriteFactory,
+    pub(super) dwrite: IDWriteFactory,
     /// One for each [`TextStyle`], in the order of [`TextStyle::ALL`].
     text: Vec<IDWriteTextFormat>,
     label: IDWriteTextFormat,
+    /// Body text on one line, for a text box.
+    pub(super) line: IDWriteTextFormat,
 }
 
 impl Formats {
@@ -46,19 +49,23 @@ impl Formats {
             })
             .collect::<Result<Vec<_>>>()?;
         let label = gfx.text_format(TextStyle::Body.size(), DWRITE_FONT_WEIGHT_NORMAL, true)?;
-        unsafe {
-            label
-                .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)
-                .call("SetWordWrapping")?;
+        let line = gfx.text_format(TextStyle::Body.size(), DWRITE_FONT_WEIGHT_NORMAL, false)?;
+        for format in [&label, &line] {
+            unsafe {
+                format
+                    .SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)
+                    .call("SetWordWrapping")?;
+            }
         }
         Ok(Self {
             dwrite: gfx.dwrite(),
             text,
             label,
+            line,
         })
     }
 
-    fn text_format(&self, style: TextStyle) -> &IDWriteTextFormat {
+    pub(super) fn text_format(&self, style: TextStyle) -> &IDWriteTextFormat {
         let i = TextStyle::ALL.iter().position(|&s| s == style).unwrap_or(1);
         &self.text[i]
     }
@@ -79,13 +86,15 @@ impl Measure for Formats {
 }
 
 /// What the pointer and the keyboard do now.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(super) struct Interaction {
     pub hover: Option<usize>,
     pub pressed: Option<usize>,
     pub focus: Option<usize>,
     /// Show the focus ring. It shows after the user uses the keyboard, as in Windows.
     pub cues: bool,
+    /// The window has the keyboard focus, so the caret of a text box shows.
+    pub active: bool,
 }
 
 pub(super) fn paint(
@@ -112,6 +121,7 @@ pub(super) fn paint(
                 };
                 draw_text(dc, formats, text, formats.text_format(*style), r, color)?;
             }
+            Content::TextBox { .. } => text_box::draw(dc, theme, formats, node, index, now)?,
             Content::Button { label, accent } => {
                 let state = ButtonState {
                     hover: now.hover == Some(index),
@@ -215,7 +225,7 @@ fn draw_text(
     Ok(())
 }
 
-fn d2d(r: Rect) -> D2D_RECT_F {
+pub(super) fn d2d(r: Rect) -> D2D_RECT_F {
     D2D_RECT_F {
         left: r.x,
         top: r.y,

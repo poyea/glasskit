@@ -196,7 +196,8 @@ foreach ($material in @('mica', 'glass', 'solid')) {
 }
 
 Step 'window keyboard' {
-    # Only keys: Tab to "Add one" and Enter, then Tab twice to OK and Enter.
+    # Only keys: Tab to "Add one" and Enter, Tab to the name box and type, then Tab twice
+    # to OK and Enter.
     $log = Join-Path $Out 'window.txt'
     $p = Start-Process (Join-Path $bin 'window.exe') -PassThru -RedirectStandardOutput $log
     try {
@@ -208,11 +209,19 @@ Step 'window keyboard' {
         Save-Picture $hwnd 'window-focus' -FromScreen
         & $key 0x0D
         & $key 0x09
+        foreach ($c in [char[]] 'jik') {
+            [GlassUi]::PostMessageW($hwnd, 0x0102, [IntPtr][int] $c, [IntPtr]::Zero) | Out-Null
+        }
+        Start-Sleep -Milliseconds 300
+        Set-OnTop $hwnd
+        Save-Picture $hwnd 'window-typed' -FromScreen
+        & $key 0x09
         & $key 0x09
         & $key 0x0D
         if (-not $p.WaitForExit(5000)) { throw 'The window did not end on OK.' }
         $lines = @(Get-Content $log)
-        if (($lines -join '|') -ne 'count 1|ok') { throw "The app printed '$($lines -join '|')', not 'count 1|ok'." }
+        $want = 'count 1|ok jik'
+        if (($lines -join '|') -ne $want) { throw "The app printed '$($lines -join '|')', not '$want'." }
     } finally {
         Stop-App $p
     }

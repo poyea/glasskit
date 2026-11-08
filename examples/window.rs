@@ -1,21 +1,22 @@
 // Copyright (c) 2026 John Law
 // SPDX-License-Identifier: MIT
 
-//! A glass window with widgets: a title, a card with a counter, and two buttons.
+//! A glass window with widgets: a title, a card with a counter, a text box, and two
+//! buttons.
 //!
 //! Run it with `cargo run -p glasskit --example window`. Pass `glass` or `solid` to see the
 //! other materials.
 
 use glasskit::Ui;
 use glasskit::events::{Event, EventLoop};
-use glasskit::widget::{Button, Card, Column, Insets, Row, Spacer, Text, TextStyle};
+use glasskit::widget::{Button, Card, Column, Insets, Row, Spacer, Text, TextBox, TextStyle};
 use glasskit::window::{Material, Window, WindowEvent};
 
 fn main() -> glasskit::Result<()> {
     let ui = Ui::new()?;
     let mut events: EventLoop<()> = EventLoop::new(&ui)?;
-    let mut window = Window::new(&ui, "glasskit", 420.0, 280.0)?;
-    window.set_min_size(320.0, 240.0);
+    let mut window = Window::new(&ui, "glasskit", 420.0, 330.0)?;
+    window.set_min_size(320.0, 290.0);
     match std::env::args().nth(1).as_deref() {
         Some("glass") => window.set_material(Material::Glass),
         Some("solid") => window.set_material(Material::Solid),
@@ -30,6 +31,7 @@ fn main() -> glasskit::Result<()> {
     let add = window.add(Button::new("Add one"));
     let counter = window.add(Row::new().gap(12.0).child(count).child(add));
     let card = window.add(Card::new().child(counter));
+    let name = window.add(TextBox::new().placeholder("Your name").max_length(40));
     let spacer = window.add(Spacer::fill());
     let cancel = window.add(Button::new("Cancel"));
     let ok = window.add(Button::new("OK").accent());
@@ -42,6 +44,7 @@ fn main() -> glasskit::Result<()> {
             .child(title)
             .child(note)
             .child(card)
+            .child(name)
             .child(gap)
             .child(buttons),
     );
@@ -60,7 +63,11 @@ fn main() -> glasskit::Result<()> {
                             println!("count {n}");
                         }
                         WindowEvent::Clicked(b) if b == ok => {
-                            println!("ok");
+                            println!("ok {}", window.text(name));
+                            return Ok(());
+                        }
+                        WindowEvent::Submitted(b) if b == name => {
+                            println!("ok {}", window.text(name));
                             return Ok(());
                         }
                         WindowEvent::Clicked(b) if b == cancel => return Ok(()),

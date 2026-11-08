@@ -100,7 +100,9 @@
 compile_error!("glasskit works only on Windows: it uses the Win32 and Windows Runtime APIs.");
 
 pub mod autostart;
+mod clipboard;
 pub mod dialog;
+mod edit;
 pub mod error;
 pub mod events;
 mod handle;

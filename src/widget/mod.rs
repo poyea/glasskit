@@ -1,8 +1,8 @@
 // Copyright (c) 2026 John Law
 // SPDX-License-Identifier: MIT
 
-//! Widgets for a [`Window`](crate::window::Window): text, buttons, cards, and the rows,
-//! columns, and stacks that place them.
+//! Widgets for a [`Window`](crate::window::Window): text, buttons, text boxes, cards, and
+//! the rows, columns, and stacks that place them.
 //!
 //! Make a widget with its builder, give it to [`Window::add`](crate::window::Window::add),
 //! and keep the [`Id`] that it gives. A container takes the ids of its children. Then
@@ -18,6 +18,7 @@ pub(crate) mod tree;
 
 pub use crate::handle::{AnyId, Id};
 
+use crate::edit::Editor;
 use tree::{Axis, Container, Content, Node};
 
 /// The kinds of widgets. They are the type parameter of [`Id`].
@@ -43,18 +44,23 @@ pub mod kind {
     /// A [`Spacer`](super::Spacer).
     #[derive(Debug)]
     pub enum Spacer {}
+    /// A [`TextBox`](super::TextBox).
+    #[derive(Debug)]
+    pub enum TextBox {}
 }
 
 mod sealed {
     pub trait Sealed {}
     impl Sealed for super::kind::Text {}
     impl Sealed for super::kind::Button {}
+    impl Sealed for super::kind::TextBox {}
 }
 
-/// Widgets that show a text that the app can read and change.
+/// Widgets with a text that the app can read and change.
 pub trait HasText: sealed::Sealed {}
 impl HasText for kind::Text {}
 impl HasText for kind::Button {}
+impl HasText for kind::TextBox {}
 
 /// The width or the height of a widget.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -436,6 +442,72 @@ impl Spacer {
     }
 }
 
+/// A box that the user types text in. It has one line, unless it is
+/// [`multiline`](TextBox::multiline).
+///
+/// A change by the user gives [`WindowEvent::Changed`](crate::window::WindowEvent::Changed),
+/// and Enter in a box with one line gives
+/// [`WindowEvent::Submitted`](crate::window::WindowEvent::Submitted). Read and change the
+/// text with [`Window::text`](crate::window::Window::text) and
+/// [`Window::set_text`](crate::window::Window::set_text).
+///
+/// The box has the usual keys of Windows: the arrows (with Ctrl, by word; with Shift, they
+/// select), Home, End, Backspace, Delete, and Ctrl+A, C, X, V, Z, and Y.
+#[derive(Debug)]
+pub struct TextBox {
+    node: Node,
+}
+
+impl TextBox {
+    /// An empty box with one line and no limit. Its width is 200 DIPs, unless the
+    /// container stretches it.
+    pub fn new() -> Self {
+        Self {
+            node: Node::leaf(Content::TextBox {
+                edit: Editor::new(false, usize::MAX),
+                placeholder: String::new(),
+                scroll: 0.0,
+            }),
+        }
+    }
+
+    /// A hint that shows while the box is empty.
+    #[must_use]
+    pub fn placeholder(mut self, text: impl Into<String>) -> Self {
+        if let Content::TextBox { placeholder, .. } = &mut self.node.content {
+            *placeholder = text.into();
+        }
+        self
+    }
+
+    /// Take many lines: Enter adds a line break. With a height of [`Length::Auto`], the box
+    /// grows with its text; else it scrolls.
+    #[must_use]
+    pub fn multiline(mut self) -> Self {
+        if let Content::TextBox { edit, .. } = &mut self.node.content {
+            edit.set_multiline(true);
+        }
+        self
+    }
+
+    /// The most characters that the box takes.
+    #[must_use]
+    pub fn max_length(mut self, chars: usize) -> Self {
+        if let Content::TextBox { edit, .. } = &mut self.node.content {
+            edit.set_max_chars(chars);
+        }
+        self
+    }
+
+    sizes!();
+}
+
+impl Default for TextBox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 element!(Text, Text);
 element!(Button, Button);
 element!(Row, Row);
@@ -443,3 +515,4 @@ element!(Column, Column);
 element!(Stack, Stack);
 element!(Card, Card);
 element!(Spacer, Spacer);
+element!(TextBox, TextBox);
