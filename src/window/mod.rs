@@ -48,12 +48,14 @@
 //! ```
 
 mod draw;
+mod key;
 mod scene;
 mod text_box;
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
@@ -67,18 +69,20 @@ use windows::Win32::UI::Input::Ime::{
     CFS_POINT, COMPOSITIONFORM, ImmGetContext, ImmReleaseContext, ImmSetCompositionWindow,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN,
-    VK_END, VK_HOME, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
+    GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_BACK, VK_CONTROL,
+    VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
+    VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, GetClientRect, GetCursorPos, HTCLIENT,
-    IDC_ARROW, IDC_IBEAM, LoadCursorW, MINMAXINFO, PostMessageW, SIZE_MINIMIZED, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetWindowPos, SetWindowTextW, WINDOW_EX_STYLE,
+    CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, GetCaretBlinkTime, GetClientRect, GetCursorPos,
+    GetMessageTime, GetSystemMetrics, HTCLIENT, IDC_ARROW, IDC_IBEAM, KillTimer, LoadCursorW,
+    MINMAXINFO, PostMessageW, SIZE_MINIMIZED, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetTimer, SetWindowPos, SetWindowTextW, WINDOW_EX_STYLE,
     WINDOW_STYLE, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CLOSE, WM_DPICHANGED, WM_ERASEBKGND,
     WM_GETMINMAXINFO, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_SETCURSOR, WM_SETFOCUS,
-    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_THEMECHANGED, WS_EX_APPWINDOW,
-    WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
+    WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER,
+    WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, PCWSTR, w};
 
@@ -97,10 +101,15 @@ use draw::{Formats, Interaction};
 use scene::{Backdrop, Scene};
 use text_box::Field;
 
+pub use key::{Key, KeyEvent};
+
 const CLASS_NAME: PCWSTR = w!("GlasskitWindow");
 /// A private message: draw the window again, once for many changes.
 const WM_REDRAW: u32 = WM_APP + 1;
 const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
+const TIMER_BLINK: usize = 1;
+/// The caret stops to blink after this time without input, as in Windows.
+const BLINK_FOR: Duration = Duration::from_secs(5);
 const STYLE: WINDOW_STYLE = WS_OVERLAPPEDWINDOW;
 const EX_STYLE: WINDOW_EX_STYLE = WINDOW_EX_STYLE(WS_EX_NOREDIRECTIONBITMAP.0 | WS_EX_APPWINDOW.0);
 
@@ -128,6 +137,8 @@ pub enum WindowEvent {
     Changed(AnyId),
     /// The user pressed Enter in a text box with one line.
     Submitted(AnyId),
+    /// The user pressed a key that no widget used, such as Esc, F5, or Ctrl+S.
+    Key(KeyEvent),
     /// The user clicked the close button or pressed Alt+F4. The window stays until the app
     /// drops it.
     CloseRequested,
@@ -164,8 +175,22 @@ struct State {
     redraw_posted: Cell<bool>,
     /// Scroll the focused text box to its caret at the next layout.
     reveal: Cell<bool>,
+    /// The last press of the left button, to count double and triple clicks.
+    clicks: Cell<Clicks>,
+    /// When the caret started to blink.
+    blink_since: Cell<Instant>,
     /// The theme and material that the background shows now.
     applied: Cell<Option<(Theme, Material)>>,
+}
+
+/// The last press of the left button.
+#[derive(Debug, Clone, Copy, Default)]
+struct Clicks {
+    count: u32,
+    /// The message time, in milliseconds.
+    time: u32,
+    /// In pixels.
+    at: (i32, i32),
 }
 
 /// The scene and the GPU devices that it draws with.
@@ -234,6 +259,8 @@ impl Window {
             tracking: Cell::new(false),
             redraw_posted: Cell::new(false),
             reveal: Cell::new(false),
+            clicks: Cell::new(Clicks::default()),
+            blink_since: Cell::new(Instant::now()),
             applied: Cell::new(None),
         };
         let native = NativeWindow::attach(hwnd, Rc::new(state));
@@ -494,6 +521,9 @@ impl State {
         if before != now {
             self.invalidate(hwnd);
         }
+        if (before.focus, before.active) != (now.focus, now.active) {
+            self.restart_blink(hwnd);
+        }
     }
 
     fn point(&self, lparam: LPARAM) -> (f32, f32) {
@@ -505,7 +535,31 @@ impl State {
 
     /// Handle a key. `repeat` is true for the messages that a held key sends again.
     fn key(&self, hwnd: HWND, key: u16, repeat: bool) -> bool {
-        // A text box takes all keys but Tab.
+        let taken = self.widget_key(hwnd, key, repeat);
+        if !taken {
+            self.push_key(Key(key), repeat);
+        }
+        taken
+    }
+
+    /// Give a key that no widget used to the app.
+    fn push_key(&self, key: Key, repeat: bool) {
+        if key.modifier() {
+            return;
+        }
+        let down = |k: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(k.0)) } < 0;
+        self.push(WindowEvent::Key(KeyEvent {
+            key,
+            ctrl: down(VK_CONTROL),
+            shift: down(VK_SHIFT),
+            alt: down(VK_MENU),
+            repeat,
+        }));
+    }
+
+    /// Handle a key in the focused widget, or Tab. It gives false when no widget used it.
+    fn widget_key(&self, hwnd: HWND, key: u16, repeat: bool) -> bool {
+        // A text box comes first, for all keys but Tab.
         if key != VK_TAB.0
             && let Some(index) = self.focused_box()
         {
@@ -584,6 +638,7 @@ impl State {
         if moved || changed {
             self.reveal.set(true);
             self.invalidate(hwnd);
+            self.restart_blink(hwnd);
         }
         if changed {
             self.push(WindowEvent::Changed(AnyId(index)));
@@ -601,7 +656,7 @@ impl State {
     /// Handle a key in a text box. It gives false for keys that the box does not take.
     fn box_key(&self, hwnd: HWND, index: usize, key: VIRTUAL_KEY, repeat: bool) -> bool {
         let down = |k: VIRTUAL_KEY| unsafe { GetKeyState(i32::from(k.0)) } < 0;
-        let (ctrl, shift) = (down(VK_CONTROL), down(VK_SHIFT));
+        let (ctrl, shift, alt) = (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU));
         let multiline = self.read_box(index, Editor::multiline).unwrap_or(false);
         // Move to a position from the layout: a line up or down, or a line edge.
         let to_line = |e: &mut Editor, f: Option<&Field>, at: &dyn Fn(&Field, u32) -> u32| {
@@ -632,7 +687,8 @@ impl State {
                     self.push(WindowEvent::Submitted(AnyId(index)));
                 }
             }
-            _ if !ctrl => return false,
+            // The keys that type text stay in the box. AltGr comes as Ctrl and Alt.
+            _ if !ctrl || alt => return !Key(key.0).types_no_text(),
             VIRTUAL_KEY(k) => match u8::try_from(k).map(char::from) {
                 Ok('A') => self.edit_box(hwnd, index, |e, _| e.select_all()),
                 Ok('C') => {
@@ -688,6 +744,79 @@ impl State {
             }
             None => false,
         });
+    }
+
+    /// Count the presses of the left button: 1, 2 for a double click, or 3 for a triple
+    /// click.
+    fn count_click(&self, lparam: LPARAM) -> u32 {
+        let at = native::point(lparam);
+        let time = unsafe { GetMessageTime() } as u32;
+        let last = self.clicks.get();
+        let (w, h) = unsafe {
+            (
+                GetSystemMetrics(SM_CXDOUBLECLK),
+                GetSystemMetrics(SM_CYDOUBLECLK),
+            )
+        };
+        let near = (at.0 - last.at.0).abs() * 2 <= w && (at.1 - last.at.1).abs() * 2 <= h;
+        let soon = time.wrapping_sub(last.time) <= unsafe { GetDoubleClickTime() };
+        let count = if near && soon && (1..3).contains(&last.count) {
+            last.count + 1
+        } else {
+            1
+        };
+        self.clicks.set(Clicks { count, time, at });
+        count
+    }
+
+    /// Select the word, for a double click, or the line, for a triple click, at a point.
+    fn select_at(&self, hwnd: HWND, index: usize, (x, y): (f32, f32), clicks: u32) {
+        self.edit_box(hwnd, index, |e, f| {
+            let Some(f) = f else {
+                return false;
+            };
+            let at = e.byte_at(f.hit(x, y));
+            if clicks == 2 {
+                e.select_word(at)
+            } else {
+                e.select_line(at)
+            }
+        });
+    }
+
+    /// Show the caret, and blink it if a text box has the focus in the active window.
+    fn restart_blink(&self, hwnd: HWND) {
+        let mut now = self.now.get();
+        if now.caret_off {
+            now.caret_off = false;
+            self.now.set(now);
+            self.invalidate(hwnd);
+        }
+        // The user can turn blinking off: then the time is INFINITE.
+        let period = unsafe { GetCaretBlinkTime() };
+        let blink = now.active && self.focused_box().is_some() && period > 0 && period != u32::MAX;
+        unsafe {
+            if blink {
+                self.blink_since.set(Instant::now());
+                SetTimer(Some(hwnd), TIMER_BLINK, period, None);
+            } else {
+                let _ = KillTimer(Some(hwnd), TIMER_BLINK);
+            }
+        }
+    }
+
+    fn blink(&self, hwnd: HWND) {
+        let mut now = self.now.get();
+        if self.blink_since.get().elapsed() >= BLINK_FOR {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), TIMER_BLINK);
+            }
+            now.caret_off = false;
+        } else {
+            now.caret_off = !now.caret_off;
+        }
+        self.now.set(now);
+        self.invalidate(hwnd);
     }
 
     /// Scroll the focused text box, so its caret shows.
@@ -882,8 +1011,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let point = state.point(lparam);
                 let hit = state.tree.borrow().hit(point.0, point.1);
                 state.set_interaction(hwnd, |now| now.hover = hit);
-                // A drag from a text box selects text.
-                if let Some(p) = state.now.get().pressed.filter(|&p| state.is_box(p)) {
+                // A drag from a text box selects text. After a double click, the word stays.
+                if let Some(p) = state.now.get().pressed.filter(|&p| state.is_box(p))
+                    && state.clicks.get().count == 1
+                {
                     state.place_caret(hwnd, p, point, true);
                 }
                 LRESULT(0)
@@ -894,6 +1025,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_LBUTTONDOWN => {
+                let clicks = state.count_click(lparam);
                 let point = state.point(lparam);
                 let hit = state.tree.borrow().hit(point.0, point.1);
                 if hit.is_some() {
@@ -908,8 +1040,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     }
                 });
                 if let Some(h) = hit.filter(|&h| state.is_box(h)) {
-                    let shift = GetKeyState(i32::from(VK_SHIFT.0)) < 0;
-                    state.place_caret(hwnd, h, point, shift);
+                    if clicks > 1 {
+                        state.select_at(hwnd, h, point, clicks);
+                    } else {
+                        let shift = GetKeyState(i32::from(VK_SHIFT.0)) < 0;
+                        state.place_caret(hwnd, h, point, shift);
+                    }
                 }
                 LRESULT(0)
             }
@@ -962,6 +1098,16 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             WM_IME_STARTCOMPOSITION => {
                 state.place_ime(hwnd);
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+            WM_TIMER if wparam.0 == TIMER_BLINK => {
+                state.blink(hwnd);
+                LRESULT(0)
+            }
+            // Alt and F10 come here. Windows still handles them, for Alt+F4 and the menu.
+            WM_SYSKEYDOWN => {
+                let repeat = (lparam.0 >> 30) & 1 == 1;
+                state.push_key(Key(wparam.0 as u16), repeat);
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_KEYDOWN => {

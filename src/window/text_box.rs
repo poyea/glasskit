@@ -311,7 +311,7 @@ pub(super) fn draw(
                 D2D1_DRAW_TEXT_OPTIONS_NONE,
             );
         }
-        if focused && now.active {
+        if focused && now.active && !now.caret_off {
             let (x, top, height) = field.caret(edit.utf16_at(edit.caret()));
             dc.FillRectangle(
                 &render::rect(x.round(), top, 1.0, height),

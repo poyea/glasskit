@@ -95,6 +95,8 @@ pub(super) struct Interaction {
     pub cues: bool,
     /// The window has the keyboard focus, so the caret of a text box shows.
     pub active: bool,
+    /// The caret is in the off half of a blink.
+    pub caret_off: bool,
 }
 
 pub(super) fn paint(

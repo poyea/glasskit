@@ -227,6 +227,22 @@ Step 'window keyboard' {
     }
 }
 
+Step 'window escape' {
+    # A key that no widget uses goes to the app: Esc ends the example.
+    $log = Join-Path $Out 'escape.txt'
+    $p = Start-Process (Join-Path $bin 'window.exe') -PassThru -RedirectStandardOutput $log
+    try {
+        $hwnd = Find-Window $p 'GlasskitWindow'
+        Start-Sleep -Milliseconds 500
+        [GlassUi]::PostMessageW($hwnd, 0x0100, [IntPtr] 0x1B, [IntPtr]::Zero) | Out-Null
+        if (-not $p.WaitForExit(5000)) { throw 'The window did not end on Esc.' }
+        $text = (Get-Content $log -Raw).Trim()
+        if ($text -ne 'escape') { throw "The app printed '$text', not 'escape'." }
+    } finally {
+        Stop-App $p
+    }
+}
+
 Step 'window idle CPU' {
     $p = Start-Process (Join-Path $bin 'window.exe') -PassThru
     try {

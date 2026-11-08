@@ -23,6 +23,26 @@ enum Last {
     Typing,
 }
 
+/// The kinds of characters that a double click tells apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    Word,
+    Space,
+    Other,
+}
+
+impl Class {
+    fn of(c: char) -> Self {
+        if c.is_alphanumeric() || c == '_' {
+            Class::Word
+        } else if c.is_whitespace() {
+            Class::Space
+        } else {
+            Class::Other
+        }
+    }
+}
+
 /// All positions are byte indices on character boundaries of the text.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Editor {
@@ -209,6 +229,50 @@ impl Editor {
         let before = (self.caret, self.anchor);
         self.anchor = 0;
         self.caret = self.text.len();
+        self.last = Last::Other;
+        before != (self.caret, self.anchor)
+    }
+
+    /// Select the word at a byte index, as a double click does: the letters and digits
+    /// around it, or the spaces, or the other characters.
+    pub fn select_word(&mut self, at: usize) -> bool {
+        let at = self.boundary(at);
+        // At the end of a word, the word before counts.
+        let Some(c) = self.text[at..]
+            .chars()
+            .next()
+            .filter(|&c| !(c == '\n' && at > 0))
+            .or_else(|| self.text[..at].chars().next_back())
+        else {
+            return false;
+        };
+        let class = Class::of(c);
+        let start = self.text[..at]
+            .char_indices()
+            .rev()
+            .find(|&(_, c)| Class::of(c) != class)
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        let end = self.text[at..]
+            .char_indices()
+            .find(|&(_, c)| Class::of(c) != class)
+            .map_or(self.text.len(), |(i, _)| at + i);
+        self.select(start, end)
+    }
+
+    /// Select the line at a byte index, without its line break, as a triple click does.
+    pub fn select_line(&mut self, at: usize) -> bool {
+        let at = self.boundary(at);
+        let start = self.text[..at].rfind('\n').map_or(0, |i| i + 1);
+        let end = self.text[at..]
+            .find('\n')
+            .map_or(self.text.len(), |i| at + i);
+        self.select(start, end)
+    }
+
+    fn select(&mut self, start: usize, end: usize) -> bool {
+        let before = (self.caret, self.anchor);
+        self.anchor = start;
+        self.caret = end;
         self.last = Last::Other;
         before != (self.caret, self.anchor)
     }
@@ -441,6 +505,40 @@ mod tests {
         e.select_all();
         assert!(e.type_unit('y' as u16));
         assert_eq!(e.text(), "y");
+    }
+
+    #[test]
+    fn a_double_click_selects_the_word() {
+        let mut e = typed("say hello_2 world!", false);
+        e.select_word(6);
+        assert_eq!(e.selected_text(), "hello_2");
+        e.select_word(10);
+        assert_eq!(e.selected_text(), "hello_2");
+        e.select_word(3);
+        assert_eq!(e.selected_text(), " ");
+        e.select_word(17);
+        assert_eq!(e.selected_text(), "!");
+        e.select_word(99);
+        assert_eq!(e.selected_text(), "!");
+    }
+
+    #[test]
+    fn a_word_can_be_in_any_script() {
+        let mut e = typed("記憶 test", false);
+        e.select_word(0);
+        assert_eq!(e.selected_text(), "記憶");
+    }
+
+    #[test]
+    fn a_triple_click_selects_the_line() {
+        let mut e = typed("", true);
+        e.insert("one\ntwo two\nthree");
+        e.select_line(6);
+        assert_eq!(e.selected_text(), "two two");
+        e.select_line(0);
+        assert_eq!(e.selected_text(), "one");
+        e.select_line(99);
+        assert_eq!(e.selected_text(), "three");
     }
 
     #[test]

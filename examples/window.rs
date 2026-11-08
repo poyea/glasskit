@@ -10,7 +10,7 @@
 use glasskit::Ui;
 use glasskit::events::{Event, EventLoop};
 use glasskit::widget::{Button, Card, Column, Insets, Row, Spacer, Text, TextBox, TextStyle};
-use glasskit::window::{Material, Window, WindowEvent};
+use glasskit::window::{Key, Material, Window, WindowEvent};
 
 fn main() -> glasskit::Result<()> {
     let ui = Ui::new()?;
@@ -71,6 +71,10 @@ fn main() -> glasskit::Result<()> {
                             return Ok(());
                         }
                         WindowEvent::Clicked(b) if b == cancel => return Ok(()),
+                        WindowEvent::Key(k) if k.is_plain(Key::ESCAPE) => {
+                            println!("escape");
+                            return Ok(());
+                        }
                         WindowEvent::CloseRequested => return Ok(()),
                         _ => {}
                     }
