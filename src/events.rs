@@ -5,19 +5,23 @@
 //!
 //! [`EventLoop::next`] handles the window messages of the thread, and returns when there is
 //! something for the app: a menu command, the end of a popup, a change in a dialog, a deadline,
-//! an unlock of the session, or a quit. Popups and dialogs that show do not stop the loop, so
+//! an unlock of the session, a wake from another thread, or a quit. Popups and dialogs that show do not stop the loop, so
 //! a dialog can stay open while popups come and go.
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, HANDLE, HWND, LPARAM, LRESULT, WAIT_OBJECT_0, WPARAM,
+};
 use windows::Win32::System::RemoteDesktop::{
     NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
 };
 use windows::Win32::System::Threading::{
-    CancelWaitableTimer, CreateWaitableTimerExW, INFINITE, SetWaitableTimer, TIMER_ALL_ACCESS,
+    CancelWaitableTimer, CreateEventW, CreateWaitableTimerExW, INFINITE, ResetEvent, SetEvent,
+    SetWaitableTimer, TIMER_ALL_ACCESS, WaitForSingleObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, IDC_ARROW, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, QS_ALLINPUT,
@@ -65,6 +69,8 @@ pub enum Event<C> {
     Deadline,
     /// The user unlocked the session: someone is at the screen again.
     SessionUnlocked,
+    /// Another thread called [`Waker::wake`]. Many calls can give one event.
+    Wake,
     /// The user picked the quit item of a tray menu, or the thread got `WM_QUIT`.
     Quit,
 }
@@ -80,6 +86,7 @@ enum Ready {
     Dialog(DialogId),
     Window(WindowId),
     SessionUnlocked,
+    Wake,
     Deadline,
 }
 
@@ -90,6 +97,7 @@ impl<C> From<Ready> for Event<C> {
             Ready::Dialog(id) => Event::Dialog(id),
             Ready::Window(id) => Event::Window(id),
             Ready::SessionUnlocked => Event::SessionUnlocked,
+            Ready::Wake => Event::Wake,
             Ready::Deadline => Event::Deadline,
         }
     }
@@ -115,6 +123,11 @@ impl<C> EventLoop<C> {
     /// The setup of the thread that the loop serves.
     pub fn ui(&self) -> &Ui {
         &self.waiter.ui
+    }
+
+    /// A handle that wakes this loop from another thread.
+    pub fn waker(&self) -> Waker {
+        Waker(Arc::clone(&self.waiter.signal))
     }
 
     pub(crate) fn add_source(&self, source: Weak<dyn Source<C>>) {
@@ -154,12 +167,14 @@ impl<C> EventLoop<C> {
 struct Waiter {
     ui: Ui,
     timer: DeadlineTimer,
+    signal: Arc<Signal>,
     window: NativeWindow<Cell<bool>>,
 }
 
 impl Waiter {
     fn new(ui: &Ui) -> Result<Self> {
         let timer = DeadlineTimer::new()?;
+        let signal = Arc::new(Signal::new()?);
         let hinstance = ui.hinstance();
         native::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
         let hwnd = native::create_hidden(CLASS_NAME, hinstance)?;
@@ -170,6 +185,7 @@ impl Waiter {
         Ok(Self {
             ui: ui.clone(),
             timer,
+            signal,
             window,
         })
     }
@@ -186,6 +202,9 @@ impl Waiter {
         if self.window.state().replace(false) {
             return Ok(Some(Ready::SessionUnlocked));
         }
+        if self.signal.take() {
+            return Ok(Some(Ready::Wake));
+        }
         if let Some(t) = until {
             if SystemTime::now() >= t {
                 return Ok(Some(Ready::Deadline));
@@ -194,7 +213,7 @@ impl Waiter {
         }
         unsafe {
             MsgWaitForMultipleObjectsEx(
-                Some(&[self.timer.0]),
+                Some(&[self.timer.0, self.signal.0]),
                 INFINITE,
                 QS_ALLINPUT,
                 MWMO_INPUTAVAILABLE,
@@ -222,6 +241,92 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             return LRESULT(0);
         }
         DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+/// Wakes an [`EventLoop`] from another thread: the loop then gives [`Event::Wake`].
+///
+/// Get it from [`EventLoop::waker`], and give it or a clone of it to the other thread. A
+/// wake after the end of the loop does nothing.
+///
+/// ```no_run
+/// use glasskit::Ui;
+/// use glasskit::events::{Event, EventLoop};
+///
+/// fn main() -> glasskit::Result<()> {
+///     let ui = Ui::new()?;
+///     let mut events: EventLoop<()> = EventLoop::new(&ui)?;
+///     let waker = events.waker();
+///     let work = std::thread::spawn(move || {
+///         // Slow work, then:
+///         waker.wake();
+///     });
+///     loop {
+///         match events.next(None)? {
+///             Event::Wake => break,
+///             Event::Quit => break,
+///             _ => {}
+///         }
+///     }
+///     work.join().expect("the work thread does not panic");
+///     Ok(())
+/// }
+/// ```
+#[derive(Clone)]
+pub struct Waker(Arc<Signal>);
+
+impl Waker {
+    /// Make the loop give [`Event::Wake`]. Calls before the loop gives the event count as one.
+    pub fn wake(&self) {
+        self.0.set();
+    }
+}
+
+impl std::fmt::Debug for Waker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Waker").finish_non_exhaustive()
+    }
+}
+
+/// An event object that stays set until [`Signal::take`]. Thus a wait that ends on it does
+/// not use it up.
+struct Signal(HANDLE);
+
+// SAFETY: all threads can use the handle of an event object, and the handle lives as long
+// as the value.
+unsafe impl Send for Signal {}
+unsafe impl Sync for Signal {}
+
+impl Signal {
+    fn new() -> Result<Self> {
+        let handle =
+            unsafe { CreateEventW(None, true, false, PCWSTR::null()).call("CreateEventW")? };
+        Ok(Self(handle))
+    }
+
+    fn set(&self) {
+        unsafe {
+            let _ = SetEvent(self.0);
+        }
+    }
+
+    /// Give true if the signal was set, and reset it.
+    fn take(&self) -> bool {
+        unsafe {
+            let set = WaitForSingleObject(self.0, 0) == WAIT_OBJECT_0;
+            if set {
+                let _ = ResetEvent(self.0);
+            }
+            set
+        }
+    }
+}
+
+impl Drop for Signal {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
     }
 }
 
@@ -304,6 +409,44 @@ mod tests {
         let mut events: EventLoop<()> = EventLoop::new(&ui).unwrap();
         let past = SystemTime::now() - Duration::from_secs(1);
         assert_eq!(events.next(Some(past)).unwrap(), Event::Deadline);
+    }
+
+    #[test]
+    fn a_wake_from_another_thread_gives_one_event() {
+        let ui = Ui::new().unwrap();
+        let mut events: EventLoop<()> = EventLoop::new(&ui).unwrap();
+        let waker = events.waker();
+        std::thread::spawn(move || {
+            waker.wake();
+            waker.wake();
+        })
+        .join()
+        .unwrap();
+        assert_eq!(events.next(None).unwrap(), Event::Wake);
+        let soon = SystemTime::now() + Duration::from_millis(20);
+        assert_eq!(events.next(Some(soon)).unwrap(), Event::Deadline);
+    }
+
+    #[test]
+    fn a_wake_ends_a_wait() {
+        let ui = Ui::new().unwrap();
+        let mut events: EventLoop<()> = EventLoop::new(&ui).unwrap();
+        let waker = events.waker();
+        let thread = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            waker.wake();
+        });
+        assert_eq!(events.next(None).unwrap(), Event::Wake);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_wake_after_the_loop_does_nothing() {
+        let ui = Ui::new().unwrap();
+        let events: EventLoop<()> = EventLoop::new(&ui).unwrap();
+        let waker = events.waker();
+        drop(events);
+        waker.wake();
     }
 
     #[test]
