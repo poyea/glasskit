@@ -81,7 +81,9 @@ impl Measure for Formats {
     }
 
     fn label(&self, label: &str) -> (f32, f32) {
-        self.size_of(label, &self.label, f32::MAX / 4.0)
+        // The label format centers its text, and centered text has no width in a box
+        // without a limit. The line format has the same font, and starts at the left.
+        self.size_of(label, &self.line, f32::MAX / 4.0)
     }
 }
 
@@ -233,5 +235,20 @@ pub(super) fn d2d(r: Rect) -> D2D_RECT_F {
         top: r.y,
         right: r.x + r.w,
         bottom: r.y + r.h,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_label_has_the_width_of_its_text() {
+        let _ui = crate::Ui::new().unwrap();
+        let formats = Formats::new(&Graphics::new().unwrap()).unwrap();
+        let (short, _) = formats.label("OK");
+        let (long, height) = formats.label("Open the folder");
+        assert!(short > 0.0 && height > 0.0);
+        assert!(long > 3.0 * short, "{long} and {short}");
     }
 }
