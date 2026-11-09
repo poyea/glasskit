@@ -29,6 +29,9 @@ pub mod kind {
     /// A [`Button`](super::Button).
     #[derive(Debug)]
     pub enum Button {}
+    /// A [`NavItem`](super::NavItem).
+    #[derive(Debug)]
+    pub enum NavItem {}
     /// A [`Row`](super::Row).
     #[derive(Debug)]
     pub enum Row {}
@@ -53,6 +56,7 @@ mod sealed {
     pub trait Sealed {}
     impl Sealed for super::kind::Text {}
     impl Sealed for super::kind::Button {}
+    impl Sealed for super::kind::NavItem {}
     impl Sealed for super::kind::TextBox {}
 }
 
@@ -60,6 +64,7 @@ mod sealed {
 pub trait HasText: sealed::Sealed {}
 impl HasText for kind::Text {}
 impl HasText for kind::Button {}
+impl HasText for kind::NavItem {}
 impl HasText for kind::TextBox {}
 
 /// The width or the height of a widget.
@@ -319,6 +324,100 @@ impl Button {
     sizes!();
 }
 
+/// An item of a navigation list, for example at the left side of a window: a label that the
+/// user picks to show one page of the window.
+///
+/// A click, Space, or Enter on it gives
+/// [`WindowEvent::Clicked`](crate::window::WindowEvent::Clicked). The item does not select
+/// itself: the app marks the item of the page that shows with
+/// [`Window::set_selected`](crate::window::Window::set_selected), and shows the page with
+/// [`Window::set_visible`](crate::window::Window::set_visible).
+///
+/// ```no_run
+/// use glasskit::Ui;
+/// use glasskit::events::{Event, EventLoop};
+/// use glasskit::widget::{Column, Insets, Length, NavItem, Row, Stack, Text, TextStyle};
+/// use glasskit::window::{Window, WindowEvent};
+///
+/// fn main() -> glasskit::Result<()> {
+///     let ui = Ui::new()?;
+///     let mut events: EventLoop<()> = EventLoop::new(&ui)?;
+///     let mut window = Window::new(&ui, "Pages", 560.0, 360.0)?;
+///     let home = window.add(NavItem::new("Home").selected(true));
+///     let about = window.add(NavItem::new("About"));
+///     let side = window.add(
+///         Column::new()
+///             .width(Length::Fixed(180.0))
+///             .gap(4.0)
+///             .child(home)
+///             .child(about),
+///     );
+///     let home_page = window.add(Text::new("Home").style(TextStyle::Title));
+///     let about_page = window.add(Text::new("About").style(TextStyle::Title));
+///     window.set_visible(about_page, false);
+///     let pages = window.add(
+///         Stack::new()
+///             .width(Length::Fill(1.0))
+///             .child(home_page)
+///             .child(about_page),
+///     );
+///     let root = window.add(
+///         Row::new()
+///             .padding(Insets::all(16.0))
+///             .gap(16.0)
+///             .child(side)
+///             .child(pages),
+///     );
+///     window.set_root(root);
+///     window.show();
+///     loop {
+///         if let Event::Window(id) = events.next(None)?
+///             && id == window.id()
+///         {
+///             while let Some(event) = window.next_event() {
+///                 match event {
+///                     WindowEvent::Clicked(item) if item == home || item == about => {
+///                         window.set_selected(home, item == home);
+///                         window.set_selected(about, item == about);
+///                         window.set_visible(home_page, item == home);
+///                         window.set_visible(about_page, item == about);
+///                     }
+///                     WindowEvent::CloseRequested => return Ok(()),
+///                     _ => {}
+///                 }
+///             }
+///         }
+///     }
+/// }
+/// ```
+#[derive(Debug)]
+pub struct NavItem {
+    node: Node,
+}
+
+impl NavItem {
+    /// An item with this label, not selected.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            node: Node::leaf(Content::NavItem {
+                label: label.into(),
+                selected: false,
+            }),
+        }
+    }
+
+    /// Mark the item as the one whose page shows.
+    #[must_use]
+    pub fn selected(mut self, on: bool) -> Self {
+        if let Content::NavItem { selected, .. } = &mut self.node.content {
+            *selected = on;
+        }
+        self
+    }
+
+    sizes!();
+}
+
 /// Children side by side, from the left.
 #[derive(Debug)]
 pub struct Row {
@@ -510,6 +609,7 @@ impl Default for TextBox {
 
 element!(Text, Text);
 element!(Button, Button);
+element!(NavItem, NavItem);
 element!(Row, Row);
 element!(Column, Column);
 element!(Stack, Stack);

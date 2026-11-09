@@ -18,11 +18,14 @@ use super::text_box;
 use crate::error::{Call, Result};
 use crate::render::{self, Graphics};
 use crate::theme::Theme;
+use crate::theme::rgba;
 use crate::widget::TextStyle;
-use crate::widget::tree::{Content, Measure, Rect, Tree};
+use crate::widget::tree::{Content, Measure, NAV_ITEM_PADDING, Rect, Tree};
 
 const BUTTON_RADIUS: f32 = 4.0;
 const CARD_RADIUS: f32 = 8.0;
+/// The mark of a selected navigation item: a bar at its left edge, in DIPs.
+const NAV_MARK: (f32, f32) = (3.0, 16.0);
 const FOCUS_GAP: f32 = 3.0;
 const FOCUS_WIDTH: f32 = 2.0;
 
@@ -126,6 +129,41 @@ pub(super) fn paint(
                 draw_text(dc, formats, text, formats.text_format(*style), r, color)?;
             }
             Content::TextBox { .. } => text_box::draw(dc, theme, formats, node, index, now)?,
+            Content::NavItem { label, selected } => {
+                let hover = now.hover == Some(index);
+                let pressed = now.pressed == Some(index) && hover;
+                let fill = match (*selected, hover, pressed) {
+                    (_, _, true) => Some(theme.button_pressed),
+                    (true, true, _) => Some(theme.button_hover),
+                    (true, false, _) | (false, true, _) => Some(theme.button),
+                    (false, false, _) => None,
+                };
+                if let Some(fill) = fill {
+                    panel(dc, r, BUTTON_RADIUS, fill, rgba(0.0, 0.0, 0.0, 0.0))?;
+                }
+                if *selected {
+                    let (w, h) = NAV_MARK;
+                    let mark = Rect::new(r.x, r.y + (r.h - h) / 2.0, w, h);
+                    panel(dc, mark, w / 2.0, theme.accent, theme.accent)?;
+                }
+                let color = if node.enabled {
+                    theme.text
+                } else {
+                    theme.subtle_text
+                };
+                let (_, text_h) = formats.label(label);
+                let (left, right) = NAV_ITEM_PADDING;
+                let text = Rect::new(
+                    r.x + left,
+                    r.y + (r.h - text_h) / 2.0,
+                    r.w - left - right,
+                    text_h,
+                );
+                draw_text(dc, formats, label, &formats.line, text, color)?;
+                if now.cues && now.focus == Some(index) {
+                    focus_ring(dc, theme, r)?;
+                }
+            }
             Content::Button { label, accent } => {
                 let state = ButtonState {
                     hover: now.hover == Some(index),

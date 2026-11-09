@@ -10,6 +10,10 @@ use crate::edit::Editor;
 /// The inner space of a button around its label, in DIPs.
 const BUTTON_PADDING: (f32, f32) = (12.0, 6.0);
 const BUTTON_MIN: (f32, f32) = (64.0, 32.0);
+/// The space in a navigation item at the left and the right of its label, in DIPs. The
+/// left space has the selection mark in it.
+pub(crate) const NAV_ITEM_PADDING: (f32, f32) = (16.0, 12.0);
+const NAV_ITEM_HEIGHT: f32 = 36.0;
 /// The inner space of a text box around its text, in DIPs. It includes the border.
 pub(crate) const TEXT_BOX_PADDING: (f32, f32) = (11.0, 6.0);
 /// The width of a text box with [`Length::Auto`], in DIPs.
@@ -62,6 +66,11 @@ pub(crate) enum Content {
         label: String,
         accent: bool,
     },
+    /// An item of a navigation list.
+    NavItem {
+        label: String,
+        selected: bool,
+    },
     /// A panel behind the children.
     Card,
     TextBox {
@@ -74,7 +83,10 @@ pub(crate) enum Content {
 
 impl Content {
     pub fn interactive(&self) -> bool {
-        matches!(self, Content::Button { .. } | Content::TextBox { .. })
+        matches!(
+            self,
+            Content::Button { .. } | Content::NavItem { .. } | Content::TextBox { .. }
+        )
     }
 }
 
@@ -101,6 +113,8 @@ pub(crate) struct Node {
     pub width: Length,
     pub height: Length,
     pub enabled: bool,
+    /// A widget that is not visible, and all widgets in it, take no space and no input.
+    pub visible: bool,
     pub parent: Option<usize>,
     /// Where the last layout put the widget.
     pub rect: Rect,
@@ -114,6 +128,7 @@ impl Node {
             width: Length::Auto,
             height: Length::Auto,
             enabled: true,
+            visible: true,
             parent: None,
             rect: Rect::default(),
         }
@@ -220,11 +235,12 @@ impl Tree {
         let p = c.padding;
         let inner_w = (max_w - p.left - p.right).max(0.0);
         let inner_h = (max_h - p.top - p.bottom).max(0.0);
-        let gaps = c.gap * c.children.len().saturating_sub(1) as f32;
-        let sizes = c
+        let shown = c
             .children
             .iter()
-            .map(|&child| self.measure(child, inner_w, inner_h, m));
+            .filter(|&&child| self.nodes[child].visible);
+        let gaps = c.gap * shown.clone().count().saturating_sub(1) as f32;
+        let sizes = shown.map(|&child| self.measure(child, inner_w, inner_h, m));
         let (w, h) = match c.axis {
             Axis::Row => sizes.fold((gaps, 0.0f32), |(w, h), (cw, ch)| (w + cw, h.max(ch))),
             Axis::Column => sizes.fold((0.0f32, gaps), |(w, h), (cw, ch)| (w.max(cw), h + ch)),
@@ -235,9 +251,10 @@ impl Tree {
 
     fn arrange(&mut self, index: usize, rect: Rect, m: &dyn Measure) {
         self.nodes[index].rect = rect;
-        let Some(c) = self.nodes[index].container.clone() else {
+        let Some(mut c) = self.nodes[index].container.clone() else {
             return;
         };
+        c.children.retain(|&child| self.nodes[child].visible);
         let inner = rect.inset(c.padding);
         match c.axis {
             Axis::Row => self.arrange_row(&c, inner, m),
@@ -353,7 +370,9 @@ impl Tree {
     /// The widgets in drawing order: a parent before its children.
     pub fn draw_order(&self) -> Vec<usize> {
         let mut out = Vec::with_capacity(self.nodes.len());
-        if let Some(root) = self.root {
+        if let Some(root) = self.root
+            && self.nodes[root].visible
+        {
             self.walk(root, &mut out);
         }
         out
@@ -362,7 +381,9 @@ impl Tree {
     fn walk(&self, index: usize, out: &mut Vec<usize>) {
         out.push(index);
         for &child in self.nodes[index].children() {
-            self.walk(child, out);
+            if self.nodes[child].visible {
+                self.walk(child, out);
+            }
         }
     }
 
@@ -380,9 +401,13 @@ impl Tree {
             .is_some_and(|n| n.enabled && n.content.interactive() && self.shown(index))
     }
 
-    /// Whether a widget is in the tree under the root.
-    fn shown(&self, mut index: usize) -> bool {
+    /// Whether a widget is in the tree under the root, and it and all widgets around it are
+    /// visible.
+    pub fn shown(&self, mut index: usize) -> bool {
         loop {
+            if !self.nodes[index].visible {
+                return false;
+            }
             if Some(index) == self.root {
                 return true;
             }
@@ -427,6 +452,13 @@ fn intrinsic(content: &Content, max_w: f32, m: &dyn Measure) -> (f32, f32) {
             (
                 (w + 2.0 * BUTTON_PADDING.0).max(BUTTON_MIN.0),
                 (h + 2.0 * BUTTON_PADDING.1).max(BUTTON_MIN.1),
+            )
+        }
+        Content::NavItem { label, .. } => {
+            let (w, h) = m.label(label);
+            (
+                w + NAV_ITEM_PADDING.0 + NAV_ITEM_PADDING.1,
+                h.max(NAV_ITEM_HEIGHT),
             )
         }
         Content::TextBox { edit, .. } => {
@@ -490,6 +522,65 @@ mod tests {
     fn with(mut node: Node, children: &[usize]) -> Node {
         node.container.as_mut().unwrap().children = children.to_vec();
         node
+    }
+
+    #[test]
+    fn a_hidden_widget_takes_no_space_and_no_gap() {
+        let mut t = Tree::default();
+        let a = t.add(text("one"));
+        let b = t.add(button("OK"));
+        let c = t.add(text("two"));
+        let mut col = with(
+            Node::container(Content::Blank, Axis::Column, Align::Stretch),
+            &[a, b, c],
+        );
+        col.container.as_mut().unwrap().gap = 10.0;
+        let col = t.add(col);
+        t.root = Some(col);
+        t.nodes[b].visible = false;
+        assert_eq!(t.measure(col, 200.0, 100.0, &Fixed), (24.0, 50.0));
+        t.layout(200.0, 100.0, &Fixed);
+        assert_eq!(t.nodes[c].rect, Rect::new(0.0, 30.0, 200.0, 20.0));
+        assert_eq!(t.draw_order(), [col, a, c]);
+        assert!(!t.focusable(b));
+        assert_eq!(t.hit(5.0, 25.0), None);
+
+        t.nodes[b].visible = true;
+        t.layout(200.0, 100.0, &Fixed);
+        assert_eq!(t.nodes[c].rect, Rect::new(0.0, 72.0, 200.0, 20.0));
+        assert_eq!(t.hit(5.0, 35.0), Some(b));
+    }
+
+    #[test]
+    fn a_hidden_container_hides_its_widgets() {
+        let mut t = Tree::default();
+        let ok = t.add(button("OK"));
+        let page = t.add(with(
+            Node::container(Content::Blank, Axis::Column, Align::Stretch),
+            &[ok],
+        ));
+        let root = t.add(with(
+            Node::container(Content::Blank, Axis::Stack, Align::Stretch),
+            &[page],
+        ));
+        t.root = Some(root);
+        t.layout(200.0, 100.0, &Fixed);
+        assert_eq!(t.hit(5.0, 5.0), Some(ok));
+        t.nodes[page].visible = false;
+        assert_eq!(t.hit(5.0, 5.0), None);
+        assert!(!t.focusable(ok));
+        assert_eq!(t.next_focus(None, false), None);
+    }
+
+    #[test]
+    fn a_navigation_item_has_space_for_its_mark() {
+        let mut t = Tree::default();
+        let item = t.add(Node::leaf(Content::NavItem {
+            label: "Inbox".into(),
+            selected: false,
+        }));
+        assert_eq!(t.measure(item, 200.0, 100.0, &Fixed), (68.0, 36.0));
+        assert!(t.nodes[item].content.interactive());
     }
 
     #[test]

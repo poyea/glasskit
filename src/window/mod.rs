@@ -96,7 +96,7 @@ use crate::render::Graphics;
 use crate::theme::Theme;
 use crate::ui::Notice;
 use crate::widget::tree::{Content, Tree};
-use crate::widget::{AnyId, Element, HasText, Id};
+use crate::widget::{AnyId, Element, HasText, Id, kind};
 use draw::{Formats, Interaction};
 use scene::{Backdrop, Scene};
 use text_box::Field;
@@ -316,7 +316,7 @@ impl Window {
     pub fn text<K: HasText>(&self, id: Id<K>) -> String {
         match self.state().tree.borrow().get(id.index).map(|n| &n.content) {
             Some(Content::Text { text, .. }) => text.clone(),
-            Some(Content::Button { label, .. }) => label.clone(),
+            Some(Content::Button { label, .. } | Content::NavItem { label, .. }) => label.clone(),
             Some(Content::TextBox { edit, .. }) => edit.text().to_string(),
             _ => String::new(),
         }
@@ -328,7 +328,9 @@ impl Window {
         if let Some(node) = self.state().tree.borrow_mut().get_mut(id.index) {
             match &mut node.content {
                 Content::Text { text, .. } => *text = value.to_string(),
-                Content::Button { label, .. } => *label = value.to_string(),
+                Content::Button { label, .. } | Content::NavItem { label, .. } => {
+                    *label = value.to_string();
+                }
                 Content::TextBox { edit, scroll, .. } => {
                     edit.set_text(value);
                     *scroll = 0.0;
@@ -351,6 +353,57 @@ impl Window {
             self.state().now.set(now);
         }
         self.state().invalidate(self.hwnd());
+    }
+
+    /// Show or hide a widget and all widgets in it. A hidden widget takes no space in its
+    /// row, column, or stack, and no clicks and no focus. A new widget is visible.
+    ///
+    /// To change pages, put the pages in a [`Stack`](crate::widget::Stack), and show one
+    /// of them.
+    pub fn set_visible(&mut self, id: impl Into<AnyId>, visible: bool) {
+        let index = id.into().0;
+        if let Some(node) = self.state().tree.borrow_mut().get_mut(index) {
+            node.visible = visible;
+        }
+        let mut now = self.state().now.get();
+        {
+            let tree = self.state().tree.borrow();
+            let shown = |i: Option<usize>| i.filter(|&i| tree.shown(i));
+            now.focus = shown(now.focus);
+            now.hover = shown(now.hover);
+            now.pressed = shown(now.pressed);
+        }
+        self.state().now.set(now);
+        self.state().invalidate(self.hwnd());
+    }
+
+    /// Whether [`set_visible`](Window::set_visible) shows the widget. A visible widget in
+    /// a hidden container does not show.
+    pub fn is_visible(&self, id: impl Into<AnyId>) -> bool {
+        let tree = self.state().tree.borrow();
+        tree.get(id.into().0).is_some_and(|n| n.visible)
+    }
+
+    /// Mark a navigation item as the one whose page shows, or remove the mark.
+    pub fn set_selected(&mut self, id: Id<kind::NavItem>, selected: bool) {
+        if let Some(Content::NavItem { selected: s, .. }) = self
+            .state()
+            .tree
+            .borrow_mut()
+            .get_mut(id.index)
+            .map(|n| &mut n.content)
+        {
+            *s = selected;
+        }
+        self.state().invalidate(self.hwnd());
+    }
+
+    /// Whether a navigation item has the mark.
+    pub fn is_selected(&self, id: Id<kind::NavItem>) -> bool {
+        matches!(
+            self.state().tree.borrow().get(id.index).map(|n| &n.content),
+            Some(Content::NavItem { selected: true, .. })
+        )
     }
 
     /// Give the keyboard focus to a widget that can take it.
