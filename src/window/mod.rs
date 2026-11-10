@@ -84,6 +84,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER,
     WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
+use windows::Win32::UI::WindowsAndMessaging::{ICON_BIG, ICON_SMALL, SendMessageW, WM_SETICON};
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::Ui;
@@ -94,6 +95,7 @@ use crate::events::WindowId;
 use crate::native::{self, NativeWindow, state_of};
 use crate::render::Graphics;
 use crate::theme::Theme;
+use crate::tray::{Icon, IconHandle};
 use crate::ui::Notice;
 use crate::widget::tree::{Content, Tree};
 use crate::widget::{AnyId, Element, HasText, Id, kind};
@@ -108,6 +110,8 @@ const CLASS_NAME: PCWSTR = w!("GlasskitWindow");
 const WM_REDRAW: u32 = WM_APP + 1;
 const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
 const TIMER_BLINK: usize = 1;
+/// How far a scroll moves for one notch of the wheel, in DIPs: three lines of body text.
+const WHEEL_STEP: f32 = 60.0;
 /// The caret stops to blink after this time without input, as in Windows.
 const BLINK_FOR: Duration = Duration::from_secs(5);
 const STYLE: WINDOW_STYLE = WS_OVERLAPPEDWINDOW;
@@ -175,6 +179,10 @@ struct State {
     redraw_posted: Cell<bool>,
     /// Scroll the focused text box to its caret at the next layout.
     reveal: Cell<bool>,
+    /// Scroll the focused widget into view at the next layout.
+    reveal_focus: Cell<bool>,
+    /// The icon of the title bar and the taskbar.
+    icon: RefCell<Option<IconHandle>>,
     /// The last press of the left button, to count double and triple clicks.
     clicks: Cell<Clicks>,
     /// When the caret started to blink.
@@ -259,6 +267,8 @@ impl Window {
             tracking: Cell::new(false),
             redraw_posted: Cell::new(false),
             reveal: Cell::new(false),
+            reveal_focus: Cell::new(false),
+            icon: RefCell::new(None),
             clicks: Cell::new(Clicks::default()),
             blink_since: Cell::new(Instant::now()),
             applied: Cell::new(None),
@@ -417,6 +427,25 @@ impl Window {
         }
     }
 
+    /// Show this picture in the title bar, the taskbar, and Alt+Tab. Windows scales it to
+    /// each place, so give a large one, such as 64 by 64 pixels.
+    pub fn set_icon(&self, icon: &Icon) -> Result<()> {
+        let handle = IconHandle::new(icon)?;
+        unsafe {
+            for kind in [ICON_SMALL, ICON_BIG] {
+                SendMessageW(
+                    self.hwnd(),
+                    WM_SETICON,
+                    Some(WPARAM(kind as usize)),
+                    Some(LPARAM(handle.0.0 as isize)),
+                );
+            }
+        }
+        // The old icon goes only now, after the window uses the new one.
+        self.state().icon.replace(Some(handle));
+        Ok(())
+    }
+
     /// Change the title.
     pub fn set_title(&self, title: &str) {
         unsafe {
@@ -487,6 +516,12 @@ impl State {
     fn render(&self, hwnd: HWND) {
         let (w, h) = self.size.get();
         self.tree.borrow_mut().layout(w, h, &self.formats);
+        if self.reveal_focus.take()
+            && let Some(focus) = self.now.get().focus
+            && self.tree.borrow_mut().reveal(focus)
+        {
+            self.tree.borrow_mut().layout(w, h, &self.formats);
+        }
         if self.reveal.take() {
             self.reveal_caret();
         }
@@ -622,6 +657,7 @@ impl State {
             k if k == VK_TAB.0 => {
                 let back = unsafe { GetKeyState(i32::from(VK_SHIFT.0)) } < 0;
                 let next = self.tree.borrow().next_focus(self.now.get().focus, back);
+                self.reveal_focus.set(true);
                 self.set_interaction(hwnd, |now| {
                     now.focus = next;
                     now.cues = true;
@@ -890,9 +926,23 @@ impl State {
         }
     }
 
-    /// Scroll a text box with many lines for the mouse wheel. It gives false when the
-    /// widget at the point is not such a box.
+    /// Scroll for the mouse wheel: a text box with many lines at the point, else the
+    /// innermost scroll there that can move. It gives false when nothing scrolled.
     fn wheel(&self, hwnd: HWND, (x, y): (f32, f32), delta: f32) -> bool {
+        if self.wheel_box(hwnd, (x, y), delta) {
+            return true;
+        }
+        // Delta is positive when the user turns the wheel away, to see what is above.
+        let step = -delta / 120.0 * WHEEL_STEP;
+        let Some(index) = self.tree.borrow().scroll_at(x, y, step) else {
+            return false;
+        };
+        self.tree.borrow_mut().scroll_by(index, step);
+        self.invalidate(hwnd);
+        true
+    }
+
+    fn wheel_box(&self, hwnd: HWND, (x, y): (f32, f32), delta: f32) -> bool {
         let Some(index) = self.tree.borrow().hit(x, y) else {
             return false;
         };

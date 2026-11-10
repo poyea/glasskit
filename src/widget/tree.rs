@@ -51,6 +51,19 @@ impl Rect {
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
+
+    /// The part that is in both rectangles. It is empty if they do not touch.
+    pub fn intersect(self, other: Rect) -> Rect {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = (self.x + self.w).min(other.x + other.w);
+        let bottom = (self.y + self.h).min(other.y + other.h);
+        Rect::new(x, y, right - x, bottom - y)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.w <= 0.0 || self.h <= 0.0
+    }
 }
 
 /// What a widget shows.
@@ -73,6 +86,13 @@ pub(crate) enum Content {
     },
     /// A panel behind the children.
     Card,
+    /// A column that scrolls up and down when its children are higher than it.
+    Scroll {
+        /// How far the children are scrolled up, in DIPs.
+        offset: f32,
+        /// The height of the children with the padding, at the last layout.
+        extent: f32,
+    },
     TextBox {
         edit: Editor,
         placeholder: String,
@@ -255,6 +275,10 @@ impl Tree {
             return;
         };
         c.children.retain(|&child| self.nodes[child].visible);
+        if let Content::Scroll { offset, .. } = self.nodes[index].content {
+            self.arrange_scroll(index, &c, rect, offset, m);
+            return;
+        }
         let inner = rect.inset(c.padding);
         match c.axis {
             Axis::Row => self.arrange_row(&c, inner, m),
@@ -268,6 +292,94 @@ impl Tree {
                 }
             }
         }
+    }
+
+    /// Place the children of a scroll as a column at their full height, moved up by the
+    /// offset. The offset stays between the top and the end of the children.
+    fn arrange_scroll(
+        &mut self,
+        index: usize,
+        c: &Container,
+        rect: Rect,
+        offset: f32,
+        m: &dyn Measure,
+    ) {
+        let (_, extent) = self.measure_container(c, rect.w, f32::MAX / 4.0, m);
+        let offset = offset.clamp(0.0, (extent - rect.h).max(0.0));
+        self.nodes[index].content = Content::Scroll { offset, extent };
+        let full = Rect::new(rect.x, rect.y - offset, rect.w, extent);
+        self.arrange_column(c, full.inset(c.padding), m);
+    }
+
+    /// The part of the window where a widget can show: the scrolls around it cut it. `None`
+    /// means that no scroll is around it.
+    pub fn clip(&self, index: usize) -> Option<Rect> {
+        let mut clip: Option<Rect> = None;
+        let mut at = self.nodes[index].parent;
+        while let Some(parent) = at {
+            if let Content::Scroll { .. } = self.nodes[parent].content {
+                let r = self.nodes[parent].rect;
+                clip = Some(clip.map_or(r, |c| c.intersect(r)));
+            }
+            at = self.nodes[parent].parent;
+        }
+        clip
+    }
+
+    /// Whether the point is in the part of the widget that shows.
+    fn shows_at(&self, index: usize, x: f32, y: f32) -> bool {
+        self.nodes[index].rect.contains(x, y) && self.clip(index).is_none_or(|c| c.contains(x, y))
+    }
+
+    /// The innermost scroll at the point that can move by `delta` DIPs. A positive delta
+    /// moves the children up, to show more of the end.
+    pub fn scroll_at(&self, x: f32, y: f32, delta: f32) -> Option<usize> {
+        self.draw_order().into_iter().rev().find(|&i| {
+            self.shows_at(i, x, y)
+                && match self.nodes[i].content {
+                    Content::Scroll { offset, extent } => {
+                        let max = (extent - self.nodes[i].rect.h).max(0.0);
+                        (delta > 0.0 && offset < max) || (delta < 0.0 && offset > 0.0)
+                    }
+                    _ => false,
+                }
+        })
+    }
+
+    /// Move a scroll by `delta` DIPs. The next layout keeps it in its range.
+    pub fn scroll_by(&mut self, index: usize, delta: f32) {
+        if let Some(Content::Scroll { offset, extent }) =
+            self.nodes.get_mut(index).map(|n| &mut n.content)
+        {
+            *offset = (*offset + delta).clamp(0.0, *extent);
+        }
+    }
+
+    /// Scroll the innermost scroll around a widget, so that all of the widget shows, or its
+    /// top if it is higher than the scroll. It gives true if the scroll moved.
+    pub fn reveal(&mut self, index: usize) -> bool {
+        let mut at = self.nodes.get(index).and_then(|n| n.parent);
+        while let Some(parent) = at {
+            if let Content::Scroll { offset, extent } = self.nodes[parent].content {
+                let view = self.nodes[parent].rect;
+                let r = self.nodes[index].rect;
+                let mut moved = offset;
+                if r.y + r.h > view.y + view.h {
+                    moved += r.y + r.h - (view.y + view.h);
+                }
+                if r.y - (moved - offset) < view.y {
+                    moved = offset - (view.y - r.y);
+                }
+                let moved = moved.clamp(0.0, (extent - view.h).max(0.0));
+                self.nodes[parent].content = Content::Scroll {
+                    offset: moved,
+                    extent,
+                };
+                return moved != offset;
+            }
+            at = self.nodes[parent].parent;
+        }
+        false
     }
 
     fn arrange_row(&mut self, c: &Container, inner: Rect, m: &dyn Measure) {
@@ -423,7 +535,7 @@ impl Tree {
         self.draw_order()
             .into_iter()
             .rev()
-            .find(|&i| self.focusable(i) && self.nodes[i].rect.contains(x, y))
+            .find(|&i| self.focusable(i) && self.shows_at(i, x, y))
     }
 
     /// The next widget for Tab, or the one before for Shift+Tab.
@@ -445,7 +557,7 @@ impl Tree {
 
 fn intrinsic(content: &Content, max_w: f32, m: &dyn Measure) -> (f32, f32) {
     match content {
-        Content::Blank | Content::Card => (0.0, 0.0),
+        Content::Blank | Content::Card | Content::Scroll { .. } => (0.0, 0.0),
         Content::Text { text, style } => m.text(text, *style, max_w),
         Content::Button { label, .. } => {
             let (w, h) = m.label(label);
@@ -522,6 +634,105 @@ mod tests {
     fn with(mut node: Node, children: &[usize]) -> Node {
         node.container.as_mut().unwrap().children = children.to_vec();
         node
+    }
+
+    fn scroll(children: &[usize]) -> Node {
+        let mut node = with(
+            Node::container(
+                Content::Scroll {
+                    offset: 0.0,
+                    extent: 0.0,
+                },
+                Axis::Column,
+                Align::Stretch,
+            ),
+            children,
+        );
+        node.height = Length::Fill(1.0);
+        node
+    }
+
+    /// Five buttons of 32 DIPs in a scroll of 100 DIPs: 160 DIPs, so 60 do not show.
+    fn five_in_a_scroll() -> (Tree, usize, Vec<usize>) {
+        let mut t = Tree::default();
+        let buttons: Vec<usize> = (0..5).map(|i| t.add(button(&format!("B{i}")))).collect();
+        let s = t.add(scroll(&buttons));
+        t.root = Some(s);
+        t.layout(200.0, 100.0, &Fixed);
+        (t, s, buttons)
+    }
+
+    #[test]
+    fn a_scroll_moves_its_children_and_stays_in_range() {
+        let (mut t, s, b) = five_in_a_scroll();
+        assert_eq!(t.nodes[b[4]].rect, Rect::new(0.0, 128.0, 200.0, 32.0));
+        assert_eq!(
+            t.nodes[s].content,
+            Content::Scroll {
+                offset: 0.0,
+                extent: 160.0
+            }
+        );
+
+        t.scroll_by(s, 40.0);
+        t.layout(200.0, 100.0, &Fixed);
+        assert_eq!(t.nodes[b[0]].rect.y, -40.0);
+        assert_eq!(t.nodes[b[4]].rect.y, 88.0);
+
+        t.scroll_by(s, 500.0);
+        t.layout(200.0, 100.0, &Fixed);
+        assert_eq!(t.nodes[b[4]].rect.y, 68.0);
+        t.scroll_by(s, -500.0);
+        t.layout(200.0, 100.0, &Fixed);
+        assert_eq!(t.nodes[b[0]].rect.y, 0.0);
+    }
+
+    #[test]
+    fn a_scroll_cuts_what_is_outside_it() {
+        let (t, s, b) = five_in_a_scroll();
+        assert_eq!(t.clip(b[3]), Some(Rect::new(0.0, 0.0, 200.0, 100.0)));
+        assert_eq!(t.clip(s), None);
+        // The fourth button is at 96 to 128: only its top shows, and only there it is hit.
+        assert_eq!(t.hit(5.0, 98.0), Some(b[3]));
+        assert_eq!(t.hit(5.0, 110.0), None);
+    }
+
+    #[test]
+    fn the_wheel_finds_a_scroll_that_can_move() {
+        let (mut t, s, _) = five_in_a_scroll();
+        assert_eq!(t.scroll_at(5.0, 50.0, 10.0), Some(s));
+        assert_eq!(t.scroll_at(5.0, 50.0, -10.0), None);
+        assert_eq!(t.scroll_at(5.0, 150.0, 10.0), None);
+        t.scroll_by(s, 60.0);
+        t.layout(200.0, 100.0, &Fixed);
+        assert_eq!(t.scroll_at(5.0, 50.0, 10.0), None);
+        assert_eq!(t.scroll_at(5.0, 50.0, -10.0), Some(s));
+    }
+
+    #[test]
+    fn reveal_scrolls_a_widget_into_view() {
+        let (mut t, s, b) = five_in_a_scroll();
+        assert!(t.reveal(b[4]));
+        t.layout(200.0, 100.0, &Fixed);
+        assert_eq!(t.nodes[b[4]].rect.y + 32.0, 100.0);
+        assert!(!t.reveal(b[4]));
+        assert!(t.reveal(b[0]));
+        t.layout(200.0, 100.0, &Fixed);
+        assert_eq!(t.nodes[b[0]].rect.y, 0.0);
+        assert!(!t.reveal(s));
+    }
+
+    #[test]
+    fn a_short_scroll_does_not_move() {
+        let mut t = Tree::default();
+        let ok = t.add(button("OK"));
+        let s = t.add(scroll(&[ok]));
+        t.root = Some(s);
+        t.layout(200.0, 100.0, &Fixed);
+        t.scroll_by(s, 50.0);
+        t.layout(200.0, 100.0, &Fixed);
+        assert_eq!(t.nodes[ok].rect.y, 0.0);
+        assert_eq!(t.scroll_at(5.0, 5.0, 10.0), None);
     }
 
     #[test]

@@ -6,7 +6,8 @@
 
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, ID2D1DeviceContext,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    ID2D1DeviceContext,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_WORD_WRAPPING_NO_WRAP,
@@ -24,6 +25,9 @@ use crate::widget::tree::{Content, Measure, NAV_ITEM_PADDING, Rect, Tree};
 
 const BUTTON_RADIUS: f32 = 4.0;
 const CARD_RADIUS: f32 = 8.0;
+/// The bar that shows where a scroll is: its width, its space from the right edge, and its
+/// shortest length, in DIPs.
+const SCROLL_BAR: (f32, f32, f32) = (3.0, 3.0, 24.0);
 /// The mark of a selected navigation item: a bar at its left edge, in DIPs.
 const NAV_MARK: (f32, f32) = (3.0, 16.0);
 const FOCUS_GAP: f32 = 3.0;
@@ -115,71 +119,119 @@ pub(super) fn paint(
         dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     }
     for index in tree.draw_order() {
-        let node = &tree.nodes[index];
-        let r = node.rect;
-        match &node.content {
-            Content::Blank => {}
-            Content::Card => panel(dc, r, CARD_RADIUS, theme.card, theme.card_border)?,
-            Content::Text { text, style } => {
-                let color = if node.enabled {
-                    theme.text
-                } else {
-                    theme.subtle_text
-                };
-                draw_text(dc, formats, text, formats.text_format(*style), r, color)?;
+        let clip = tree.clip(index);
+        if clip.is_some_and(|c| c.intersect(tree.nodes[index].rect).is_empty()) {
+            continue;
+        }
+        if let Some(c) = clip {
+            unsafe { dc.PushAxisAlignedClip(&d2d(c), D2D1_ANTIALIAS_MODE_ALIASED) };
+        }
+        let drawn = widget(dc, tree, index, theme, formats, now);
+        if clip.is_some() {
+            unsafe { dc.PopAxisAlignedClip() };
+        }
+        drawn?;
+    }
+    for index in tree.draw_order() {
+        if let Content::Scroll { offset, extent } = tree.nodes[index].content {
+            scroll_bar(dc, theme, tree.nodes[index].rect, offset, extent)?;
+        }
+    }
+    Ok(())
+}
+
+/// The bar of a scroll whose children are higher than it.
+fn scroll_bar(
+    dc: &ID2D1DeviceContext,
+    theme: &Theme,
+    r: Rect,
+    offset: f32,
+    extent: f32,
+) -> windows::core::Result<()> {
+    if extent <= r.h || r.h <= 0.0 {
+        return Ok(());
+    }
+    let (width, inset, min) = SCROLL_BAR;
+    let length = (r.h * r.h / extent).max(min).min(r.h);
+    let y = r.y + (r.h - length) * (offset / (extent - r.h));
+    let bar = Rect::new(r.x + r.w - width - inset, y, width, length);
+    let mut color = theme.subtle_text;
+    color.a *= 0.6;
+    panel(dc, bar, width / 2.0, color, color)
+}
+
+fn widget(
+    dc: &ID2D1DeviceContext,
+    tree: &Tree,
+    index: usize,
+    theme: &Theme,
+    formats: &Formats,
+    now: Interaction,
+) -> windows::core::Result<()> {
+    let node = &tree.nodes[index];
+    let r = node.rect;
+    match &node.content {
+        Content::Blank | Content::Scroll { .. } => {}
+        Content::Card => panel(dc, r, CARD_RADIUS, theme.card, theme.card_border)?,
+        Content::Text { text, style } => {
+            let color = if node.enabled {
+                theme.text
+            } else {
+                theme.subtle_text
+            };
+            draw_text(dc, formats, text, formats.text_format(*style), r, color)?;
+        }
+        Content::TextBox { .. } => text_box::draw(dc, theme, formats, node, index, now)?,
+        Content::NavItem { label, selected } => {
+            let hover = now.hover == Some(index);
+            let pressed = now.pressed == Some(index) && hover;
+            let fill = match (*selected, hover, pressed) {
+                (_, _, true) => Some(theme.button_pressed),
+                (true, true, _) => Some(theme.button_hover),
+                (true, false, _) | (false, true, _) => Some(theme.button),
+                (false, false, _) => None,
+            };
+            if let Some(fill) = fill {
+                panel(dc, r, BUTTON_RADIUS, fill, rgba(0.0, 0.0, 0.0, 0.0))?;
             }
-            Content::TextBox { .. } => text_box::draw(dc, theme, formats, node, index, now)?,
-            Content::NavItem { label, selected } => {
-                let hover = now.hover == Some(index);
-                let pressed = now.pressed == Some(index) && hover;
-                let fill = match (*selected, hover, pressed) {
-                    (_, _, true) => Some(theme.button_pressed),
-                    (true, true, _) => Some(theme.button_hover),
-                    (true, false, _) | (false, true, _) => Some(theme.button),
-                    (false, false, _) => None,
-                };
-                if let Some(fill) = fill {
-                    panel(dc, r, BUTTON_RADIUS, fill, rgba(0.0, 0.0, 0.0, 0.0))?;
-                }
-                if *selected {
-                    let (w, h) = NAV_MARK;
-                    let mark = Rect::new(r.x, r.y + (r.h - h) / 2.0, w, h);
-                    panel(dc, mark, w / 2.0, theme.accent, theme.accent)?;
-                }
-                let color = if node.enabled {
-                    theme.text
-                } else {
-                    theme.subtle_text
-                };
-                let (_, text_h) = formats.label(label);
-                let (left, right) = NAV_ITEM_PADDING;
-                let text = Rect::new(
-                    r.x + left,
-                    r.y + (r.h - text_h) / 2.0,
-                    r.w - left - right,
-                    text_h,
-                );
-                draw_text(dc, formats, label, &formats.line, text, color)?;
-                if now.cues && now.focus == Some(index) {
-                    focus_ring(dc, theme, r)?;
-                }
+            if *selected {
+                let (w, h) = NAV_MARK;
+                let mark = Rect::new(r.x, r.y + (r.h - h) / 2.0, w, h);
+                panel(dc, mark, w / 2.0, theme.accent, theme.accent)?;
             }
-            Content::Button { label, accent } => {
-                let state = ButtonState {
-                    hover: now.hover == Some(index),
-                    pressed: now.pressed == Some(index) && now.hover == Some(index),
-                    enabled: node.enabled,
-                };
-                button(dc, theme, r, *accent, state)?;
-                let color = match (*accent, node.enabled) {
-                    (_, false) => theme.subtle_text,
-                    (true, true) => theme.on_accent,
-                    (false, true) => theme.text,
-                };
-                draw_text(dc, formats, label, &formats.label, r, color)?;
-                if now.cues && now.focus == Some(index) {
-                    focus_ring(dc, theme, r)?;
-                }
+            let color = if node.enabled {
+                theme.text
+            } else {
+                theme.subtle_text
+            };
+            let (_, text_h) = formats.label(label);
+            let (left, right) = NAV_ITEM_PADDING;
+            let text = Rect::new(
+                r.x + left,
+                r.y + (r.h - text_h) / 2.0,
+                r.w - left - right,
+                text_h,
+            );
+            draw_text(dc, formats, label, &formats.line, text, color)?;
+            if now.cues && now.focus == Some(index) {
+                focus_ring(dc, theme, r)?;
+            }
+        }
+        Content::Button { label, accent } => {
+            let state = ButtonState {
+                hover: now.hover == Some(index),
+                pressed: now.pressed == Some(index) && now.hover == Some(index),
+                enabled: node.enabled,
+            };
+            button(dc, theme, r, *accent, state)?;
+            let color = match (*accent, node.enabled) {
+                (_, false) => theme.subtle_text,
+                (true, true) => theme.on_accent,
+                (false, true) => theme.text,
+            };
+            draw_text(dc, formats, label, &formats.label, r, color)?;
+            if now.cues && now.focus == Some(index) {
+                focus_ring(dc, theme, r)?;
             }
         }
     }

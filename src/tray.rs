@@ -106,7 +106,9 @@ impl<C> MenuItem<C> {
     }
 }
 
-/// The picture of a tray icon.
+/// The picture of a tray icon, or of a window with [`Window::set_icon`].
+///
+/// [`Window::set_icon`]: crate::window::Window::set_icon
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Icon {
     size: u32,
@@ -187,7 +189,13 @@ impl<C: Clone> Source<C> for Core<C> {
 }
 
 /// An icon handle that Windows destroys when the value is dropped.
-struct IconHandle(HICON);
+pub(crate) struct IconHandle(pub(crate) HICON);
+
+impl IconHandle {
+    pub(crate) fn new(icon: &Icon) -> Result<Self> {
+        create_icon(icon).map(Self)
+    }
+}
 
 impl Drop for IconHandle {
     fn drop(&mut self) {
@@ -207,7 +215,7 @@ struct Native {
 impl Native {
     fn new(hinstance: HINSTANCE, tooltip: &str, icon: &Icon) -> Result<Self> {
         native::register_class(CLASS_NAME, Some(wndproc), hinstance, IDC_ARROW)?;
-        let icon = IconHandle(create_icon(icon)?);
+        let icon = IconHandle::new(icon)?;
         // Use a hidden top-level window. A message-only window does not get the
         // TaskbarCreated message when Explorer restarts.
         let hwnd = native::create_hidden(CLASS_NAME, hinstance)?;

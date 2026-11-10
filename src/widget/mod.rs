@@ -44,6 +44,9 @@ pub mod kind {
     /// A [`Card`](super::Card).
     #[derive(Debug)]
     pub enum Card {}
+    /// A [`Scroll`](super::Scroll).
+    #[derive(Debug)]
+    pub enum Scroll {}
     /// A [`Spacer`](super::Spacer).
     #[derive(Debug)]
     pub enum Spacer {}
@@ -517,6 +520,42 @@ impl Default for Card {
     }
 }
 
+/// A column that the user scrolls up and down, when its children are higher than it: with
+/// the mouse wheel, or with Tab to a widget that does not show. A thin bar at the right
+/// shows where the view is.
+///
+/// Its children have the height that they want: [`Length::Fill`] gives them no more. By
+/// default, the scroll fills the height that its row or column leaves.
+#[derive(Debug)]
+pub struct Scroll {
+    node: Node,
+}
+
+impl Scroll {
+    /// An empty scroll.
+    pub fn new() -> Self {
+        let mut node = Node::container(
+            Content::Scroll {
+                offset: 0.0,
+                extent: 0.0,
+            },
+            Axis::Column,
+            Align::Stretch,
+        );
+        node.height = Length::Fill(1.0);
+        Self { node }
+    }
+
+    sizes!();
+    container!();
+}
+
+impl Default for Scroll {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Empty space. By default, it takes all the space that is left.
 #[derive(Debug)]
 pub struct Spacer {
@@ -614,5 +653,6 @@ element!(Row, Row);
 element!(Column, Column);
 element!(Stack, Stack);
 element!(Card, Card);
+element!(Scroll, Scroll);
 element!(Spacer, Spacer);
 element!(TextBox, TextBox);
