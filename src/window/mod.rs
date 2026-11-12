@@ -60,7 +60,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWM_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea,
+    DWMWA_USE_HOSTBACKDROPBRUSH, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea,
 };
 use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
@@ -233,6 +233,8 @@ impl Window {
         // Until the state is attached, the window procedure uses the defaults. The window
         // drops if a step fails.
         let guard = native::DestroyOnError::new(hwnd);
+        // Without this, the brush of Material::Glass shows no desktop: the window is opaque.
+        native::set_dwm_attribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, 1);
         let scale = unsafe { GetDpiForWindow(hwnd) }.max(96) as f32 / 96.0;
         let (outer_w, outer_h) = outer_size(width, height, scale);
         unsafe {
