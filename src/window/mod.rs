@@ -59,7 +59,7 @@ use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
-    DWM_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWM_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_USE_HOSTBACKDROPBRUSH, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea,
 };
 use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
@@ -581,12 +581,11 @@ impl State {
             Material::Glass => Backdrop::Glass,
             Material::Solid => Backdrop::Solid,
         };
-        let mica = backdrop == Backdrop::Mica && set_backdrop_type(hwnd, DWMSBT_MAINWINDOW);
+        // Mica stays below all materials, and Glass and Solid cover it. A removal of Mica
+        // shows the desktop through the window until the new background is there.
+        let mica = set_backdrop_type(hwnd, DWMSBT_MAINWINDOW);
         if backdrop == Backdrop::Mica && !mica {
             backdrop = Backdrop::Glass;
-        }
-        if !mica {
-            set_backdrop_type(hwnd, DWMSBT_NONE);
         }
         // Mica shows only where the frame reaches into the client area.
         let reach = if mica { -1 } else { 0 };
