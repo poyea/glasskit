@@ -21,7 +21,9 @@ use crate::render::{self, Graphics};
 use crate::theme::Theme;
 use crate::theme::rgba;
 use crate::widget::TextStyle;
-use crate::widget::tree::{Content, Measure, NAV_ITEM_PADDING, Rect, Tree};
+use crate::widget::tree::{
+    Content, Measure, NAV_ICON, NAV_ITEM_PADDING, Rect, SIDE_COMPACT_WIDTH, Tree,
+};
 
 const BUTTON_RADIUS: f32 = 4.0;
 const CARD_RADIUS: f32 = 8.0;
@@ -32,6 +34,9 @@ const SCROLL_BAR: (f32, f32, f32) = (3.0, 3.0, 24.0);
 const NAV_MARK: (f32, f32) = (3.0, 16.0);
 const FOCUS_GAP: f32 = 3.0;
 const FOCUS_WIDTH: f32 = 2.0;
+const ICON_SIZE: f32 = 16.0;
+/// The three lines of the button of a side bar, in the icon font.
+const SIDE_TOGGLE_ICON: &str = "\u{E700}";
 
 pub(super) struct Formats {
     pub(super) dwrite: IDWriteFactory,
@@ -40,6 +45,7 @@ pub(super) struct Formats {
     label: IDWriteTextFormat,
     /// Body text on one line, for a text box.
     pub(super) line: IDWriteTextFormat,
+    icon: IDWriteTextFormat,
 }
 
 impl Formats {
@@ -69,6 +75,7 @@ impl Formats {
             text,
             label,
             line,
+            icon: gfx.icon_format(ICON_SIZE)?,
         })
     }
 
@@ -171,7 +178,22 @@ fn widget(
     let node = &tree.nodes[index];
     let r = node.rect;
     match &node.content {
-        Content::Blank | Content::Scroll { .. } => {}
+        Content::Blank | Content::Scroll { .. } | Content::SideBar { .. } => {}
+        Content::SideToggle => {
+            let hover = now.hover == Some(index);
+            let fill = match (hover, now.pressed == Some(index)) {
+                (true, true) => Some(theme.button_pressed),
+                (true, false) => Some(theme.button),
+                (false, _) => None,
+            };
+            if let Some(fill) = fill {
+                panel(dc, r, BUTTON_RADIUS, fill, rgba(0.0, 0.0, 0.0, 0.0))?;
+            }
+            draw_text(dc, formats, SIDE_TOGGLE_ICON, &formats.icon, r, theme.text)?;
+            if now.cues && now.focus == Some(index) {
+                focus_ring(dc, theme, r)?;
+            }
+        }
         Content::Card => panel(dc, r, CARD_RADIUS, theme.card, theme.card_border)?,
         Content::Text { text, style } => {
             let color = if node.enabled {
@@ -182,7 +204,11 @@ fn widget(
             draw_text(dc, formats, text, formats.text_format(*style), r, color)?;
         }
         Content::TextBox { .. } => text_box::draw(dc, theme, formats, node, index, now)?,
-        Content::NavItem { label, selected } => {
+        Content::NavItem {
+            label,
+            icon,
+            selected,
+        } => {
             let hover = now.hover == Some(index);
             let pressed = now.pressed == Some(index) && hover;
             let fill = match (*selected, hover, pressed) {
@@ -204,15 +230,27 @@ fn widget(
             } else {
                 theme.subtle_text
             };
-            let (_, text_h) = formats.label(label);
+            let compact = tree.compact(index);
             let (left, right) = NAV_ITEM_PADDING;
-            let text = Rect::new(
-                r.x + left,
-                r.y + (r.h - text_h) / 2.0,
-                r.w - left - right,
-                text_h,
-            );
-            draw_text(dc, formats, label, &formats.line, text, color)?;
+            let mut left = left;
+            if let Some(icon) = icon {
+                let slot = Rect::new(r.x, r.y, SIDE_COMPACT_WIDTH.min(r.w), r.h);
+                draw_text(dc, formats, icon, &formats.icon, slot, color)?;
+                left += NAV_ICON.0 + NAV_ICON.1;
+            }
+            if !compact {
+                let (_, text_h) = formats.label(label);
+                let text = Rect::new(
+                    r.x + left,
+                    r.y + (r.h - text_h) / 2.0,
+                    r.w - left - right,
+                    text_h,
+                );
+                draw_text(dc, formats, label, &formats.line, text, color)?;
+            } else if icon.is_none() {
+                let first: String = label.chars().take(1).collect();
+                draw_text(dc, formats, &first, &formats.label, r, color)?;
+            }
             if now.cues && now.focus == Some(index) {
                 focus_ring(dc, theme, r)?;
             }

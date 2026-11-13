@@ -195,6 +195,20 @@ foreach ($material in @('mica', 'glass', 'solid')) {
     }
 }
 
+foreach ($mode in @('expanded', 'icons', 'collapsed')) {
+    Step "side bar $mode" {
+        $p = Start-Process (Join-Path $bin 'sidebar.exe') -ArgumentList $mode -PassThru
+        try {
+            $hwnd = Find-Window $p 'GlasskitWindow'
+            Start-Sleep -Milliseconds 800
+            Set-OnTop $hwnd
+            Save-Picture $hwnd "sidebar-$mode" -FromScreen
+        } finally {
+            Stop-App $p
+        }
+    }
+}
+
 Step 'window keyboard' {
     # Only keys: Tab to "Add one" and Enter, Tab to the name box and type, then Tab twice
     # to OK and Enter.

@@ -53,6 +53,9 @@ pub mod kind {
     /// A [`TextBox`](super::TextBox).
     #[derive(Debug)]
     pub enum TextBox {}
+    /// A [`SideBar`](super::SideBar).
+    #[derive(Debug)]
+    pub enum SideBar {}
 }
 
 mod sealed {
@@ -94,6 +97,23 @@ pub enum Align {
     End,
     /// Across the full space, if its length is [`Length::Auto`].
     Stretch,
+}
+
+/// How much of a [`SideBar`] shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SideMode {
+    /// The full width: the title, and each item with its icon and its label.
+    #[default]
+    Expanded,
+    /// A narrow bar: each item shows only its icon.
+    Icons,
+    /// A narrow bar with only the button that changes the mode.
+    Collapsed,
+}
+
+impl SideMode {
+    /// All modes, from the widest.
+    pub const ALL: [SideMode; 3] = [SideMode::Expanded, SideMode::Icons, SideMode::Collapsed];
 }
 
 /// Space inside the edges of a container, in DIPs.
@@ -404,9 +424,24 @@ impl NavItem {
         Self {
             node: Node::leaf(Content::NavItem {
                 label: label.into(),
+                icon: None,
                 selected: false,
             }),
         }
+    }
+
+    /// Show an icon before the label: a character of the icon font of Windows, Segoe Fluent
+    /// Icons, such as `"\u{E80F}"` for a house. Windows 10 has the same characters in Segoe
+    /// MDL2 Assets.
+    ///
+    /// In a [`SideBar`] that is not expanded, the item shows only its icon. An item without
+    /// an icon shows the first letter of its label there.
+    #[must_use]
+    pub fn icon(mut self, icon: impl Into<String>) -> Self {
+        if let Content::NavItem { icon: i, .. } = &mut self.node.content {
+            *i = Some(icon.into());
+        }
+        self
     }
 
     /// Mark the item as the one whose page shows.
@@ -419,6 +454,115 @@ impl NavItem {
     }
 
     sizes!();
+}
+
+/// A column of [`NavItem`]s at the side of a window, which the user can make narrow.
+///
+/// The bar has a [`SideMode`]. A button at its top steps through the modes that
+/// [`modes`](SideBar::modes) names, and each step gives
+/// [`WindowEvent::SideModeChanged`](crate::window::WindowEvent::SideModeChanged). The app
+/// can also read and change the mode with
+/// [`Window::side_mode`](crate::window::Window::side_mode) and
+/// [`Window::set_side_mode`](crate::window::Window::set_side_mode).
+///
+/// ```no_run
+/// use glasskit::Ui;
+/// use glasskit::widget::{NavItem, SideBar, SideMode, Spacer};
+/// use glasskit::window::Window;
+///
+/// fn main() -> glasskit::Result<()> {
+///     let ui = Ui::new()?;
+///     let mut window = Window::new(&ui, "Pages", 560.0, 360.0)?;
+///     let home = window.add(NavItem::new("Home").icon("\u{E80F}").selected(true));
+///     let mail = window.add(NavItem::new("Mail").icon("\u{E715}"));
+///     let gap = window.add(Spacer::fill());
+///     let settings = window.add(NavItem::new("Settings").icon("\u{E713}"));
+///     let side = window.add(
+///         SideBar::new()
+///             .title("Pages")
+///             .expanded_width(180.0)
+///             .modes([SideMode::Expanded, SideMode::Icons])
+///             .gap(4.0)
+///             .child(home)
+///             .child(mail)
+///             .child(gap)
+///             .child(settings),
+///     );
+///     window.set_side_mode(side, SideMode::Icons);
+///     Ok(())
+/// }
+/// ```
+#[derive(Debug)]
+pub struct SideBar {
+    node: Node,
+}
+
+impl SideBar {
+    /// An expanded bar of 200 DIPs with no title, whose button steps through all modes.
+    pub fn new() -> Self {
+        Self {
+            node: Node::container(
+                Content::SideBar {
+                    mode: SideMode::Expanded,
+                    modes: SideMode::ALL.to_vec(),
+                    width: 200.0,
+                    title: String::new(),
+                },
+                Axis::Column,
+                Align::Stretch,
+            ),
+        }
+    }
+
+    /// A title at the top, which shows when the bar is expanded.
+    #[must_use]
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        if let Content::SideBar { title: t, .. } = &mut self.node.content {
+            *t = title.into();
+        }
+        self
+    }
+
+    /// The width of the expanded bar, in DIPs.
+    #[must_use]
+    pub fn expanded_width(mut self, width: f32) -> Self {
+        if let Content::SideBar { width: w, .. } = &mut self.node.content {
+            *w = width;
+        }
+        self
+    }
+
+    /// The mode at the start.
+    #[must_use]
+    pub fn mode(mut self, mode: SideMode) -> Self {
+        if let Content::SideBar { mode: m, .. } = &mut self.node.content {
+            *m = mode;
+        }
+        self
+    }
+
+    /// The modes that the button steps through, in this order. With fewer than two modes,
+    /// the bar has no button, and only the app changes the mode.
+    #[must_use]
+    pub fn modes(mut self, modes: impl IntoIterator<Item = SideMode>) -> Self {
+        if let Content::SideBar { modes: m, .. } = &mut self.node.content {
+            m.clear();
+            for mode in modes {
+                if !m.contains(&mode) {
+                    m.push(mode);
+                }
+            }
+        }
+        self
+    }
+
+    container!();
+}
+
+impl Default for SideBar {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Children side by side, from the left.
@@ -656,3 +800,4 @@ element!(Card, Card);
 element!(Scroll, Scroll);
 element!(Spacer, Spacer);
 element!(TextBox, TextBox);
+element!(SideBar, SideBar);

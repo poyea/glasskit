@@ -4,7 +4,7 @@
 //! The widgets of a window as a tree, and its layout: measure, then arrange. It has no
 //! window code. Text sizes come from a [`Measure`], so tests can use simple numbers.
 
-use super::{Align, Insets, Length, TextStyle};
+use super::{Align, Insets, Length, SideMode, TextStyle};
 use crate::edit::Editor;
 
 /// The inner space of a button around its label, in DIPs.
@@ -14,6 +14,12 @@ const BUTTON_MIN: (f32, f32) = (64.0, 32.0);
 /// left space has the selection mark in it.
 pub(crate) const NAV_ITEM_PADDING: (f32, f32) = (16.0, 12.0);
 const NAV_ITEM_HEIGHT: f32 = 36.0;
+/// The width of the icon of a navigation item, and the space between it and the label, in
+/// DIPs.
+pub(crate) const NAV_ICON: (f32, f32) = (16.0, 16.0);
+/// The width of a side bar that is not expanded, and of its button, in DIPs. The icon of a
+/// navigation item is in the middle of this width.
+pub(crate) const SIDE_COMPACT_WIDTH: f32 = 48.0;
 /// The inner space of a text box around its text, in DIPs. It includes the border.
 pub(crate) const TEXT_BOX_PADDING: (f32, f32) = (11.0, 6.0);
 /// The width of a text box with [`Length::Auto`], in DIPs.
@@ -82,8 +88,20 @@ pub(crate) enum Content {
     /// An item of a navigation list.
     NavItem {
         label: String,
+        icon: Option<String>,
         selected: bool,
     },
+    /// A side bar. Its first child is its head: a row with its button and its title.
+    SideBar {
+        mode: SideMode,
+        /// The modes that the button steps through.
+        modes: Vec<SideMode>,
+        /// The width when it is expanded, in DIPs.
+        width: f32,
+        title: String,
+    },
+    /// The button of a side bar.
+    SideToggle,
     /// A panel behind the children.
     Card,
     /// A column that scrolls up and down when its children are higher than it.
@@ -105,7 +123,10 @@ impl Content {
     pub fn interactive(&self) -> bool {
         matches!(
             self,
-            Content::Button { .. } | Content::NavItem { .. } | Content::TextBox { .. }
+            Content::Button { .. }
+                | Content::NavItem { .. }
+                | Content::SideToggle
+                | Content::TextBox { .. }
         )
     }
 }
@@ -188,10 +209,15 @@ pub(crate) struct Tree {
 impl Tree {
     /// Add a widget. Its children move out of any container that held them before.
     pub fn add(&mut self, node: Node) -> usize {
+        let limit = self.nodes.len();
+        let head = match &node.content {
+            Content::SideBar { title, .. } => Some(self.add_side_head(title.clone())),
+            _ => None,
+        };
         let index = self.nodes.len();
-        let mut children: Vec<usize> = Vec::new();
+        let mut children: Vec<usize> = head.into_iter().collect();
         for &child in node.children() {
-            if child < index && !children.contains(&child) {
+            if child < limit && !children.contains(&child) {
                 children.push(child);
             }
         }
@@ -209,7 +235,110 @@ impl Tree {
                 self.root = None;
             }
         }
+        self.apply_side(index);
         index
+    }
+
+    fn add_side_head(&mut self, title: String) -> usize {
+        let toggle = self.add(Node::leaf(Content::SideToggle));
+        let title = self.add(Node::leaf(Content::Text {
+            text: title,
+            style: TextStyle::Subtitle,
+        }));
+        let mut head = Node::container(Content::Blank, Axis::Row, Align::Center);
+        if let Some(c) = &mut head.container {
+            c.children = vec![toggle, title];
+        }
+        self.add(head)
+    }
+
+    /// Give a side bar the width of its mode, and show the parts of its head that the mode
+    /// has.
+    fn apply_side(&mut self, bar: usize) {
+        let Content::SideBar {
+            mode,
+            modes,
+            width,
+            title,
+        } = &self.nodes[bar].content
+        else {
+            return;
+        };
+        let expanded = *mode == SideMode::Expanded;
+        let button = modes.len() > 1;
+        let named = expanded && !title.is_empty();
+        let padding = self.nodes[bar]
+            .container
+            .as_ref()
+            .map_or(0.0, |c| c.padding.left + c.padding.right);
+        let width = if expanded {
+            *width
+        } else {
+            SIDE_COMPACT_WIDTH + padding
+        };
+        self.nodes[bar].width = Length::Fixed(width);
+        let Some(&head) = self.nodes[bar].children().first() else {
+            return;
+        };
+        self.nodes[head].visible = button || named;
+        if let &[toggle, title] = self.nodes[head].children() {
+            self.nodes[toggle].visible = button;
+            self.nodes[title].visible = named;
+        }
+    }
+
+    pub fn side_mode(&self, bar: usize) -> Option<SideMode> {
+        match self.nodes.get(bar)?.content {
+            Content::SideBar { mode, .. } => Some(mode),
+            _ => None,
+        }
+    }
+
+    pub fn set_side_mode(&mut self, bar: usize, to: SideMode) {
+        if let Some(Content::SideBar { mode, .. }) = self.nodes.get_mut(bar).map(|n| &mut n.content)
+        {
+            *mode = to;
+            self.apply_side(bar);
+        }
+    }
+
+    /// Put the side bar of this button in its next mode. It gives the side bar.
+    pub fn step_side(&mut self, toggle: usize) -> Option<usize> {
+        let head = self.nodes.get(toggle)?.parent?;
+        let bar = self.nodes[head].parent?;
+        let Content::SideBar { mode, modes, .. } = &self.nodes[bar].content else {
+            return None;
+        };
+        let at = modes.iter().position(|m| m == mode);
+        let next = *modes.get(at.map_or(0, |i| (i + 1) % modes.len()))?;
+        self.set_side_mode(bar, next);
+        Some(bar)
+    }
+
+    /// Whether a widget is in a side bar that is not expanded.
+    pub fn compact(&self, index: usize) -> bool {
+        let mut at = self.nodes[index].parent;
+        while let Some(parent) = at {
+            if let Content::SideBar { mode, .. } = self.nodes[parent].content {
+                return mode != SideMode::Expanded;
+            }
+            at = self.nodes[parent].parent;
+        }
+        false
+    }
+
+    /// Whether a widget takes space in its container: it is visible, and it is not below
+    /// the head of a collapsed side bar.
+    fn present(&self, index: usize) -> bool {
+        let n = &self.nodes[index];
+        n.visible
+            && n.parent.is_none_or(|p| match self.nodes[p].content {
+                Content::SideBar {
+                    mode: SideMode::Collapsed,
+                    ..
+                } => self.nodes[p].children().first() == Some(&index),
+                _ => true,
+            })
     }
 
     pub fn get(&self, index: usize) -> Option<&Node> {
@@ -236,7 +365,7 @@ impl Tree {
         };
         let (w, h) = match &n.container {
             Some(c) => self.measure_container(c, max_w, max_h, m),
-            None => intrinsic(&n.content, max_w, m),
+            None => intrinsic(&n.content, self.compact(index), max_w, m),
         };
         let pick = |length: Length, content: f32| match length {
             Length::Fixed(v) => v,
@@ -255,10 +384,7 @@ impl Tree {
         let p = c.padding;
         let inner_w = (max_w - p.left - p.right).max(0.0);
         let inner_h = (max_h - p.top - p.bottom).max(0.0);
-        let shown = c
-            .children
-            .iter()
-            .filter(|&&child| self.nodes[child].visible);
+        let shown = c.children.iter().filter(|&&child| self.present(child));
         let gaps = c.gap * shown.clone().count().saturating_sub(1) as f32;
         let sizes = shown.map(|&child| self.measure(child, inner_w, inner_h, m));
         let (w, h) = match c.axis {
@@ -274,7 +400,7 @@ impl Tree {
         let Some(mut c) = self.nodes[index].container.clone() else {
             return;
         };
-        c.children.retain(|&child| self.nodes[child].visible);
+        c.children.retain(|&child| self.present(child));
         if let Content::Scroll { offset, .. } = self.nodes[index].content {
             self.arrange_scroll(index, &c, rect, offset, m);
             return;
@@ -493,7 +619,7 @@ impl Tree {
     fn walk(&self, index: usize, out: &mut Vec<usize>) {
         out.push(index);
         for &child in self.nodes[index].children() {
-            if self.nodes[child].visible {
+            if self.present(child) {
                 self.walk(child, out);
             }
         }
@@ -517,7 +643,7 @@ impl Tree {
     /// visible.
     pub fn shown(&self, mut index: usize) -> bool {
         loop {
-            if !self.nodes[index].visible {
+            if !self.present(index) {
                 return false;
             }
             if Some(index) == self.root {
@@ -555,9 +681,13 @@ impl Tree {
     }
 }
 
-fn intrinsic(content: &Content, max_w: f32, m: &dyn Measure) -> (f32, f32) {
+fn intrinsic(content: &Content, compact: bool, max_w: f32, m: &dyn Measure) -> (f32, f32) {
     match content {
-        Content::Blank | Content::Card | Content::Scroll { .. } => (0.0, 0.0),
+        Content::Blank | Content::Card | Content::Scroll { .. } | Content::SideBar { .. } => {
+            (0.0, 0.0)
+        }
+        Content::SideToggle => (SIDE_COMPACT_WIDTH, NAV_ITEM_HEIGHT),
+        Content::NavItem { .. } if compact => (SIDE_COMPACT_WIDTH, NAV_ITEM_HEIGHT),
         Content::Text { text, style } => m.text(text, *style, max_w),
         Content::Button { label, .. } => {
             let (w, h) = m.label(label);
@@ -566,10 +696,11 @@ fn intrinsic(content: &Content, max_w: f32, m: &dyn Measure) -> (f32, f32) {
                 (h + 2.0 * BUTTON_PADDING.1).max(BUTTON_MIN.1),
             )
         }
-        Content::NavItem { label, .. } => {
+        Content::NavItem { label, icon, .. } => {
             let (w, h) = m.label(label);
+            let icon = icon.as_ref().map_or(0.0, |_| NAV_ICON.0 + NAV_ICON.1);
             (
-                w + NAV_ITEM_PADDING.0 + NAV_ITEM_PADDING.1,
+                w + icon + NAV_ITEM_PADDING.0 + NAV_ITEM_PADDING.1,
                 h.max(NAV_ITEM_HEIGHT),
             )
         }
@@ -786,12 +917,102 @@ mod tests {
     #[test]
     fn a_navigation_item_has_space_for_its_mark() {
         let mut t = Tree::default();
-        let item = t.add(Node::leaf(Content::NavItem {
-            label: "Inbox".into(),
-            selected: false,
-        }));
+        let item = t.add(nav("Inbox", None));
         assert_eq!(t.measure(item, 200.0, 100.0, &Fixed), (68.0, 36.0));
         assert!(t.nodes[item].content.interactive());
+        let with_icon = t.add(nav("Inbox", Some("i")));
+        assert_eq!(t.measure(with_icon, 200.0, 100.0, &Fixed), (100.0, 36.0));
+    }
+
+    fn nav(label: &str, icon: Option<&str>) -> Node {
+        Node::leaf(Content::NavItem {
+            label: label.into(),
+            icon: icon.map(Into::into),
+            selected: false,
+        })
+    }
+
+    /// A side bar of 200 DIPs with two items, at the left of a page, in a window of 400 by
+    /// 300 DIPs.
+    fn side_bar(modes: &[SideMode], title: &str) -> (Tree, usize, [usize; 2], usize) {
+        let mut t = Tree::default();
+        let items = [t.add(nav("Home", Some("h"))), t.add(nav("Mail", None))];
+        let bar = t.add(with(
+            Node::container(
+                Content::SideBar {
+                    mode: SideMode::Expanded,
+                    modes: modes.to_vec(),
+                    width: 200.0,
+                    title: title.into(),
+                },
+                Axis::Column,
+                Align::Stretch,
+            ),
+            &items,
+        ));
+        let mut page = text("page");
+        page.width = Length::Fill(1.0);
+        let page = t.add(page);
+        let row = t.add(with(
+            Node::container(Content::Blank, Axis::Row, Align::Stretch),
+            &[bar, page],
+        ));
+        t.root = Some(row);
+        t.layout(400.0, 300.0, &Fixed);
+        (t, bar, items, page)
+    }
+
+    fn toggle_of(t: &Tree, bar: usize) -> usize {
+        let head = t.nodes[bar].children()[0];
+        t.nodes[head].children()[0]
+    }
+
+    #[test]
+    fn a_side_bar_has_a_width_for_each_mode() {
+        let (mut t, bar, items, page) = side_bar(&SideMode::ALL, "App");
+        let toggle = toggle_of(&t, bar);
+        assert_eq!(t.nodes[bar].rect.w, 200.0);
+        assert_eq!(t.nodes[toggle].rect, Rect::new(0.0, 0.0, 48.0, 36.0));
+        assert_eq!(t.nodes[items[0]].rect, Rect::new(0.0, 36.0, 200.0, 36.0));
+        assert_eq!(t.nodes[page].rect.x, 200.0);
+
+        t.set_side_mode(bar, SideMode::Icons);
+        t.layout(400.0, 300.0, &Fixed);
+        assert_eq!(t.nodes[items[1]].rect, Rect::new(0.0, 72.0, 48.0, 36.0));
+        assert_eq!(t.nodes[page].rect.x, 48.0);
+        assert_eq!(t.focus_order(), [toggle, items[0], items[1]]);
+
+        t.set_side_mode(bar, SideMode::Collapsed);
+        t.layout(400.0, 300.0, &Fixed);
+        assert_eq!(t.nodes[bar].rect.w, 48.0);
+        assert_eq!(t.focus_order(), [toggle]);
+        assert_eq!(t.hit(5.0, 40.0), None);
+        assert!(!t.shown(items[0]));
+    }
+
+    #[test]
+    fn the_button_of_a_side_bar_steps_through_its_modes() {
+        let (mut t, bar, _, _) = side_bar(&[SideMode::Expanded, SideMode::Collapsed], "");
+        let toggle = toggle_of(&t, bar);
+        assert_eq!(t.step_side(toggle), Some(bar));
+        assert_eq!(t.side_mode(bar), Some(SideMode::Collapsed));
+        t.step_side(toggle);
+        assert_eq!(t.side_mode(bar), Some(SideMode::Expanded));
+        // From a mode that is not in the list, the button goes to the first one.
+        t.set_side_mode(bar, SideMode::Icons);
+        t.step_side(toggle);
+        assert_eq!(t.side_mode(bar), Some(SideMode::Expanded));
+    }
+
+    #[test]
+    fn a_side_bar_with_one_mode_has_no_button() {
+        let (t, _, items, _) = side_bar(&[SideMode::Expanded], "");
+        assert_eq!(t.focus_order(), items);
+        assert_eq!(t.nodes[items[0]].rect.y, 0.0);
+        let (t, bar, items, _) = side_bar(&[], "App");
+        let head = t.nodes[bar].children()[0];
+        assert!(t.shown(head));
+        assert_eq!(t.focus_order(), items);
     }
 
     #[test]

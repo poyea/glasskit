@@ -27,14 +27,15 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-    DWRITE_FONT_WEIGHT, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
-    DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTextLayout,
+    DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory,
+    IDWriteTextFormat, IDWriteTextLayout,
 };
 use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::System::WinRT::Composition::{
     ICompositionDrawingSurfaceInterop, ICompositorInterop,
 };
-use windows::core::{Interface, w};
+use windows::core::{BOOL, Interface, PCWSTR, w};
 use windows_numerics::{Matrix3x2, Vector2};
 
 /// The GPU devices. Keep them only while a window shows, because they use much memory.
@@ -89,11 +90,43 @@ impl Graphics {
         weight: DWRITE_FONT_WEIGHT,
         centered: bool,
     ) -> Result<IDWriteTextFormat> {
+        self.format(w!("Segoe UI Variable Text"), size_px, weight, centered)
+    }
+
+    /// A centered format in the icon font of Windows. Windows 10 does not have Segoe Fluent
+    /// Icons, and has the same icons in Segoe MDL2 Assets.
+    pub fn icon_format(&self, size_px: f32) -> Result<IDWriteTextFormat> {
+        let fluent = w!("Segoe Fluent Icons");
+        let mut fonts = None;
+        let (mut index, mut found) = (0u32, BOOL(0));
+        unsafe {
+            self.dwrite
+                .GetSystemFontCollection(&mut fonts, false)
+                .call("GetSystemFontCollection")?;
+            if let Some(fonts) = &fonts {
+                let _ = fonts.FindFamilyName(fluent, &mut index, &mut found);
+            }
+        }
+        let family = if found.as_bool() {
+            fluent
+        } else {
+            w!("Segoe MDL2 Assets")
+        };
+        self.format(family, size_px, DWRITE_FONT_WEIGHT_NORMAL, true)
+    }
+
+    fn format(
+        &self,
+        family: PCWSTR,
+        size_px: f32,
+        weight: DWRITE_FONT_WEIGHT,
+        centered: bool,
+    ) -> Result<IDWriteTextFormat> {
         unsafe {
             let format = self
                 .dwrite
                 .CreateTextFormat(
-                    w!("Segoe UI Variable Text"),
+                    family,
                     None,
                     weight,
                     DWRITE_FONT_STYLE_NORMAL,

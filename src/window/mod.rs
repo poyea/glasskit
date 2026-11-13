@@ -98,7 +98,7 @@ use crate::theme::Theme;
 use crate::tray::{Icon, IconHandle};
 use crate::ui::Notice;
 use crate::widget::tree::{Content, Tree};
-use crate::widget::{AnyId, Element, HasText, Id, kind};
+use crate::widget::{AnyId, Element, HasText, Id, SideMode, kind};
 use draw::{Formats, Interaction};
 use scene::{Backdrop, Scene};
 use text_box::Field;
@@ -143,6 +143,9 @@ pub enum WindowEvent {
     Submitted(AnyId),
     /// The user pressed a key that no widget used, such as Esc, F5, or Ctrl+S.
     Key(KeyEvent),
+    /// The user changed the mode of a [`SideBar`](crate::widget::SideBar) with its button.
+    /// [`Window::side_mode`] gives the new mode.
+    SideModeChanged(AnyId),
     /// The user clicked the close button or pressed Alt+F4. The window stays until the app
     /// drops it.
     CloseRequested,
@@ -377,16 +380,22 @@ impl Window {
         if let Some(node) = self.state().tree.borrow_mut().get_mut(index) {
             node.visible = visible;
         }
-        let mut now = self.state().now.get();
-        {
-            let tree = self.state().tree.borrow();
-            let shown = |i: Option<usize>| i.filter(|&i| tree.shown(i));
-            now.focus = shown(now.focus);
-            now.hover = shown(now.hover);
-            now.pressed = shown(now.pressed);
-        }
-        self.state().now.set(now);
+        self.state().forget_hidden();
         self.state().invalidate(self.hwnd());
+    }
+
+    /// Change how much of a side bar shows. It gives no
+    /// [`WindowEvent::SideModeChanged`].
+    pub fn set_side_mode(&mut self, id: Id<kind::SideBar>, mode: SideMode) {
+        self.state().tree.borrow_mut().set_side_mode(id.index, mode);
+        self.state().forget_hidden();
+        self.state().invalidate(self.hwnd());
+    }
+
+    /// How much of a side bar shows.
+    pub fn side_mode(&self, id: Id<kind::SideBar>) -> SideMode {
+        let mode = self.state().tree.borrow().side_mode(id.index);
+        mode.unwrap_or_default()
     }
 
     /// Whether [`set_visible`](Window::set_visible) shows the widget. A visible widget in
@@ -502,6 +511,37 @@ impl State {
         events.push_back(event);
         drop(events);
         crate::ui::notify(Notice::Window(self.id));
+    }
+
+    /// A click on a widget, or Space or Enter on it.
+    fn click(&self, hwnd: HWND, index: usize) {
+        let toggle = matches!(
+            self.tree.borrow().get(index).map(|n| &n.content),
+            Some(Content::SideToggle)
+        );
+        if !toggle {
+            self.push(WindowEvent::Clicked(AnyId(index)));
+            return;
+        }
+        let bar = self.tree.borrow_mut().step_side(index);
+        if let Some(bar) = bar {
+            self.forget_hidden();
+            self.invalidate(hwnd);
+            self.push(WindowEvent::SideModeChanged(AnyId(bar)));
+        }
+    }
+
+    /// Take the focus, the hover, and the press away from widgets that do not show.
+    fn forget_hidden(&self) {
+        let mut now = self.now.get();
+        {
+            let tree = self.tree.borrow();
+            let shown = |i: Option<usize>| i.filter(|&i| tree.shown(i));
+            now.focus = shown(now.focus);
+            now.hover = shown(now.hover);
+            now.pressed = shown(now.pressed);
+        }
+        self.now.set(now);
     }
 
     /// Draw again on the next turn of the loop. Many changes give one frame.
@@ -670,7 +710,7 @@ impl State {
                 let focus = self.now.get().focus;
                 if let Some(focus) = focus.filter(|&f| self.tree.borrow().focusable(f)) {
                     self.set_interaction(hwnd, |now| now.cues = true);
-                    self.push(WindowEvent::Clicked(AnyId(focus)));
+                    self.click(hwnd, focus);
                 }
                 true
             }
@@ -1163,7 +1203,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     && hit == Some(p)
                     && !state.is_box(p)
                 {
-                    state.push(WindowEvent::Clicked(AnyId(p)));
+                    state.click(hwnd, p);
                 }
                 LRESULT(0)
             }
