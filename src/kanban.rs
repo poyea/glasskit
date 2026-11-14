@@ -5,11 +5,15 @@
 //!
 //! A card has a title and a body. The user drags a card to another place in its lane or to
 //! another lane. A click on a card opens a small window that changes its title and its
-//! body, and that can clone, pin, archive, or delete the card. Each lane has a button that
-//! adds a card.
+//! body, and that can clone, pin, archive, or delete the card. The menu of a card, with the
+//! right button of the mouse, has the same commands. Each lane has a button that adds a
+//! card.
 //!
 //! - A card and a lane can have a color. The window of a card sets the color of the card,
-//!   and the Color button of a lane sets the color of the lane.
+//!   and the window of a lane sets the color of the lane.
+//! - The board can have any number of lanes. The window of a lane, from the button with
+//!   three dots, changes its name and deletes the lane. [`Board::add_lane_by_user`] asks
+//!   the user for a new lane. The user cannot delete a [fixed](Board::set_lane_fixed) lane.
 //! - A pinned card shows a pin, and stays above the cards of its lane that are not pinned.
 //! - An archived card does not show, until the app asks for the archived cards with
 //!   [`Board::set_show_archived`]. Then it is at the end of its lane.
@@ -61,18 +65,27 @@ use std::collections::HashMap;
 
 use crate::dialog::{Bounds, Dialog, EditStyle, Event, Flow};
 use crate::layout::{Column as Rows, Size};
+use crate::tray::MenuItem;
 use crate::widget::{
-    Align, Button, Card, Column, Id, Insets, Length, Row, Scroll, Spacer, Text, TextStyle, Tint,
-    kind,
+    Align, Button, Card, Column, Id, Insets, Length, Row, Scroll, Text, TextStyle, Tint, kind,
 };
 use crate::window::{Window, WindowEvent};
 use crate::{Result, Ui};
 
 const EDITOR_WIDTH: i32 = 560;
 const EDITOR_HEIGHT: i32 = 346;
-const LANE_EDITOR_WIDTH: i32 = 300;
-const LANE_EDITOR_HEIGHT: i32 = 96;
+const LANE_EDITOR_WIDTH: i32 = 340;
+const LANE_EDITOR_HEIGHT: i32 = 132;
 const NO_COLOR: &str = "No color";
+/// Characters of the icon font.
+const ADD_ICON: &str = "\u{E710}";
+const MORE_ICON: &str = "\u{E712}";
+const PIN_ICON: &str = "\u{E718}";
+const UNPIN_ICON: &str = "\u{E77A}";
+const CLONE_ICON: &str = "\u{E8C8}";
+const ARCHIVE_ICON: &str = "\u{E7B8}";
+const RESTORE_ICON: &str = "\u{E7A7}";
+const DELETE_ICON: &str = "\u{E74D}";
 
 /// What a card of a [`Board`] holds.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -139,8 +152,21 @@ pub enum BoardEvent {
     Pinned(CardKey),
     /// The user archived a card, or took it back. [`Board::card`] gives the state.
     Archived(CardKey),
-    /// The user changed the color of a lane. [`Board::lane_tint`] gives the color.
-    LaneTinted(usize),
+    /// The user added a lane, at the end.
+    LaneAdded(usize),
+    /// The user changed the name or the color of a lane. [`Board::lane_name`] and
+    /// [`Board::lane_tint`] give them.
+    LaneChanged(usize),
+    /// The user deleted a lane and its cards. The lanes after it have an index that is one
+    /// less than before.
+    LaneRemoved {
+        /// The index that the lane had.
+        lane: usize,
+        /// The name that the lane had.
+        name: String,
+        /// What its cards held, from the top.
+        cards: Vec<CardData>,
+    },
     /// The user deleted a card.
     Deleted {
         /// The key that the card had.
@@ -257,16 +283,83 @@ impl Model {
         let (lane, at) = self.find(key)?;
         Some(self.lanes[lane].remove(at).data)
     }
+
+    /// Add an empty lane at the end, and give its index.
+    fn add_lane(&mut self) -> usize {
+        self.lanes.push(Vec::new());
+        self.lanes.len() - 1
+    }
+
+    /// Remove a lane, and give what its cards held.
+    fn remove_lane(&mut self, lane: usize) -> Option<Vec<CardData>> {
+        if lane >= self.lanes.len() {
+            return None;
+        }
+        let cards = self.lanes.remove(lane);
+        Some(cards.into_iter().map(|e| e.data).collect())
+    }
 }
 
 struct Lane {
     name: String,
     tint: Option<Tint>,
+    /// The user cannot delete the lane.
+    fixed: bool,
     panel: Id<kind::Card>,
+    title: Id<kind::Text>,
     list: Id<kind::Scroll>,
     add: Id<kind::Button>,
-    color: Id<kind::Button>,
+    edit: Id<kind::Button>,
     count: Id<kind::Text>,
+}
+
+impl Lane {
+    fn new(window: &mut Window, name: &str) -> Self {
+        let title = window.add(
+            Text::new(name)
+                .style(TextStyle::BodyStrong)
+                .width(Length::Fill(1.0)),
+        );
+        let count = window.add(Text::new("0").style(TextStyle::Caption));
+        let edit = window.add(Button::icon(MORE_ICON));
+        let add = window.add(Button::icon(ADD_ICON));
+        let head = window.add(
+            Row::new()
+                .gap(8.0)
+                .child(title)
+                .child(count)
+                .child(edit)
+                .child(add),
+        );
+        // Space at the right keeps the cards clear of the scroll bar.
+        let list = window.add(
+            Scroll::new()
+                .gap(8.0)
+                .padding(Insets {
+                    right: 10.0,
+                    ..Insets::default()
+                })
+                .drop_target(),
+        );
+        let parts = window.add(Column::new().gap(8.0).child(head).child(list));
+        let panel = window.add(
+            Card::new()
+                .width(Length::Fill(1.0))
+                .padding(Insets::all(12.0))
+                .child(parts),
+        );
+        Self {
+            name: name.to_owned(),
+            tint: None,
+            fixed: false,
+            panel,
+            title,
+            list,
+            add,
+            edit,
+            count,
+        }
+    }
 }
 
 /// A kanban board in a [`Window`]. See the [module](self) for what the user can do on it.
@@ -292,51 +385,7 @@ impl std::fmt::Debug for Board {
 impl Board {
     /// A board with one empty lane for each name, in the widgets of `window`.
     pub fn new(window: &mut Window, lanes: &[&str]) -> Self {
-        let lanes: Vec<Lane> = lanes
-            .iter()
-            .map(|name| {
-                let title = window.add(Text::new(*name).style(TextStyle::BodyStrong));
-                let count = window.add(Text::new("0").style(TextStyle::Caption));
-                let gap = window.add(Spacer::fill());
-                let color = window.add(Button::new("Color"));
-                let add = window.add(Button::new("Add"));
-                let head = window.add(
-                    Row::new()
-                        .gap(8.0)
-                        .child(title)
-                        .child(count)
-                        .child(gap)
-                        .child(color)
-                        .child(add),
-                );
-                // Space at the right keeps the cards clear of the scroll bar.
-                let list = window.add(
-                    Scroll::new()
-                        .gap(8.0)
-                        .padding(Insets {
-                            right: 10.0,
-                            ..Insets::default()
-                        })
-                        .drop_target(),
-                );
-                let parts = window.add(Column::new().gap(8.0).child(head).child(list));
-                let panel = window.add(
-                    Card::new()
-                        .width(Length::Fill(1.0))
-                        .padding(Insets::all(12.0))
-                        .child(parts),
-                );
-                Lane {
-                    name: (*name).to_owned(),
-                    tint: None,
-                    panel,
-                    list,
-                    add,
-                    color,
-                    count,
-                }
-            })
-            .collect();
+        let lanes: Vec<Lane> = lanes.iter().map(|name| Lane::new(window, name)).collect();
         let row = window.add(
             Row::new()
                 .gap(12.0)
@@ -368,6 +417,60 @@ impl Board {
     /// The name of a lane.
     pub fn lane_name(&self, lane: usize) -> Option<&str> {
         self.lanes.get(lane).map(|l| l.name.as_str())
+    }
+
+    /// Change the name of a lane.
+    pub fn set_lane_name(&mut self, window: &mut Window, lane: usize, name: &str) {
+        if let Some(lane) = self.lanes.get_mut(lane) {
+            lane.name = name.to_owned();
+            window.set_text(lane.title, name);
+        }
+    }
+
+    /// Add an empty lane at the end, and give its index.
+    pub fn add_lane(&mut self, window: &mut Window, name: &str) -> usize {
+        self.lanes.push(Lane::new(window, name));
+        self.show_lanes(window);
+        self.model.add_lane()
+    }
+
+    /// Remove a lane and its cards, and give what the cards held, from the top. The lanes
+    /// after it then have an index that is one less than before.
+    pub fn remove_lane(&mut self, window: &mut Window, lane: usize) -> Option<Vec<CardData>> {
+        let cards = self.model.remove_lane(lane)?;
+        self.lanes.remove(lane);
+        self.show_lanes(window);
+        self.sync(window);
+        Some(cards)
+    }
+
+    /// Whether the user cannot delete a lane.
+    pub fn lane_fixed(&self, lane: usize) -> bool {
+        self.lanes.get(lane).is_some_and(|l| l.fixed)
+    }
+
+    /// Keep a lane: the user can change its name and its color, but cannot delete it. The
+    /// app can still remove it with [`Board::remove_lane`].
+    pub fn set_lane_fixed(&mut self, lane: usize, fixed: bool) {
+        if let Some(lane) = self.lanes.get_mut(lane) {
+            lane.fixed = fixed;
+        }
+    }
+
+    /// Ask the user for the name and the color of a new lane, in a small window, and wait
+    /// until it closes. The new lane goes at the end, and the result is
+    /// [`BoardEvent::LaneAdded`].
+    pub fn add_lane_by_user(&mut self, ui: &Ui, window: &mut Window) -> Result<Option<BoardEvent>> {
+        let Some(LaneEdit::Save { name, tint }) = lane_editor(ui, window, None)? else {
+            return Ok(None);
+        };
+        let lane = self.add_lane(window, &name);
+        self.set_lane_tint(window, lane, tint);
+        Ok(Some(BoardEvent::LaneAdded(lane)))
+    }
+
+    fn show_lanes(&self, window: &mut Window) {
+        window.set_children(self.row, self.lanes.iter().map(|lane| lane.panel));
     }
 
     /// The color of a lane.
@@ -456,9 +559,9 @@ impl Board {
     }
 
     /// Give an event of the window to the board. If the event is for the board, the board
-    /// changes, and the result tells what the user did. A click on a card or on the button
-    /// of a lane opens the window of the card, and this call returns when that window
-    /// closes.
+    /// changes, and the result tells what the user did. A click on a card or on a button of
+    /// a lane opens a small window, and a click with the right button on a card opens a
+    /// menu. This call returns when the window or the menu closes.
     pub fn handle(
         &mut self,
         ui: &Ui,
@@ -470,19 +573,18 @@ impl Board {
                 if let Some(lane) = self.lanes.iter().position(|lane| *id == lane.add) {
                     return self.add_by_user(ui, window, lane);
                 }
-                if let Some(lane) = self.lanes.iter().position(|lane| *id == lane.color) {
-                    let now = &self.lanes[lane];
-                    let Some(tint) = lane_editor(ui, &now.name, now.tint)? else {
-                        return Ok(None);
-                    };
-                    self.set_lane_tint(window, lane, tint);
-                    return Ok(Some(BoardEvent::LaneTinted(lane)));
+                if let Some(lane) = self.lanes.iter().position(|lane| *id == lane.edit) {
+                    return self.edit_lane(ui, window, lane);
                 }
                 match self.key_of(|widget| *id == widget) {
                     Some(key) => self.edit(ui, window, key),
                     None => Ok(None),
                 }
             }
+            WindowEvent::ContextRequested(id) => match self.key_of(|widget| *id == widget) {
+                Some(key) => self.menu(ui, window, key),
+                None => Ok(None),
+            },
             WindowEvent::Dropped {
                 item,
                 target,
@@ -515,25 +617,56 @@ impl Board {
         if card.locked {
             return Ok(Some(BoardEvent::Clicked(key)));
         }
-        let Some(edit) = editor(ui, &card, false)? else {
+        let Some(edit) = editor(ui, window, &card, false)? else {
             return Ok(None);
         };
-        let Edit {
-            action,
-            title,
-            body,
-            tint,
-        } = edit;
+        Ok(self.apply(window, key, edit.action, Some(edit)))
+    }
+
+    /// Show the menu of a card, and do what the user picks. A locked card has no menu.
+    fn menu(&mut self, ui: &Ui, window: &mut Window, key: CardKey) -> Result<Option<BoardEvent>> {
+        let Some(card) = self.model.get(key).filter(|card| !card.locked) else {
+            return Ok(None);
+        };
+        let pin = if card.pinned { "Unpin" } else { "Pin" };
+        let archive = if card.archived { "Restore" } else { "Archive" };
+        // `None` is the command that opens the window of the card.
+        let items = [
+            MenuItem::command(None, "Edit"),
+            MenuItem::command(Some(Action::Pin), pin),
+            MenuItem::command(Some(Action::Clone), "Clone"),
+            MenuItem::command(Some(Action::Archive), archive),
+            MenuItem::Separator,
+            MenuItem::command(Some(Action::Delete), "Delete"),
+        ];
+        match window.menu(&items) {
+            None => Ok(None),
+            Some(None) => self.edit(ui, window, key),
+            Some(Some(action)) => Ok(self.apply(window, key, action, None)),
+        }
+    }
+
+    /// Do an action on a card. With `edit`, the card first takes its texts and its color.
+    fn apply(
+        &mut self,
+        window: &mut Window,
+        key: CardKey,
+        action: Action,
+        edit: Option<Edit>,
+    ) -> Option<BoardEvent> {
         let event = match action {
             Action::Delete => self
                 .model
                 .remove(key)
                 .map(|card| BoardEvent::Deleted { key, card }),
             Action::Save | Action::Clone | Action::Pin | Action::Archive => {
+                self.model.get(key)?;
                 self.model.update(key, |card| {
-                    card.title = title;
-                    card.body = body;
-                    card.tint = tint;
+                    if let Some(edit) = edit {
+                        card.title = edit.title;
+                        card.body = edit.body;
+                        card.tint = edit.tint;
+                    }
                     card.pinned ^= action == Action::Pin;
                     card.archived ^= action == Action::Archive;
                 });
@@ -549,7 +682,7 @@ impl Board {
             }
         };
         self.sync(window);
-        Ok(event)
+        event
     }
 
     fn add_by_user(
@@ -558,7 +691,7 @@ impl Board {
         window: &mut Window,
         lane: usize,
     ) -> Result<Option<BoardEvent>> {
-        let Some(edit) = editor(ui, &CardData::default(), true)? else {
+        let Some(edit) = editor(ui, window, &CardData::default(), true)? else {
             return Ok(None);
         };
         let card = CardData {
@@ -567,6 +700,36 @@ impl Board {
         };
         let key = self.add_card(window, lane, card);
         Ok(key.map(BoardEvent::Added))
+    }
+
+    /// Open the window of a lane, and wait until it closes.
+    fn edit_lane(
+        &mut self,
+        ui: &Ui,
+        window: &mut Window,
+        lane: usize,
+    ) -> Result<Option<BoardEvent>> {
+        let cards = &self.model.lanes[lane];
+        let now = LaneNow {
+            name: &self.lanes[lane].name,
+            tint: self.lanes[lane].tint,
+            fixed: self.lanes[lane].fixed,
+            cards: cards.len(),
+            locked: cards.iter().any(|e| e.data.locked),
+        };
+        match lane_editor(ui, window, Some(now))? {
+            None => Ok(None),
+            Some(LaneEdit::Save { name, tint }) => {
+                self.set_lane_name(window, lane, &name);
+                self.set_lane_tint(window, lane, tint);
+                Ok(Some(BoardEvent::LaneChanged(lane)))
+            }
+            Some(LaneEdit::Delete) => {
+                let name = self.lanes[lane].name.clone();
+                let cards = self.remove_lane(window, lane).unwrap_or_default();
+                Ok(Some(BoardEvent::LaneRemoved { lane, name, cards }))
+            }
+        }
     }
 
     fn key_of(&self, is: impl Fn(Id<kind::Card>) -> bool) -> Option<CardKey> {
@@ -672,44 +835,118 @@ fn color_at(index: Option<usize>) -> Option<Tint> {
     Tint::ALL.get(index?.checked_sub(1)?).copied()
 }
 
+/// A lane as its window shows it at the start.
+struct LaneNow<'a> {
+    name: &'a str,
+    tint: Option<Tint>,
+    fixed: bool,
+    /// The number of its cards, also the archived ones.
+    cards: usize,
+    /// It has a card that the user cannot delete.
+    locked: bool,
+}
+
+/// What the user chose in the window of a lane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LaneEdit {
+    Save { name: String, tint: Option<Tint> },
+    Delete,
+}
+
+/// The question before a lane with cards goes.
+fn delete_question(cards: usize) -> String {
+    match cards {
+        1 => "Delete this lane and its card?".to_owned(),
+        n => format!("Delete this lane and its {n} cards, also the archived ones?"),
+    }
+}
+
 /// Show the window of a lane, and wait until it closes. `None` means that the user changed
-/// nothing.
-fn lane_editor(ui: &Ui, name: &str, tint: Option<Tint>) -> Result<Option<Option<Tint>>> {
+/// nothing. Without a lane, the window is for a new lane.
+fn lane_editor(ui: &Ui, owner: &Window, lane: Option<LaneNow>) -> Result<Option<LaneEdit>> {
     let (width, height) = (LANE_EDITOR_WIDTH, LANE_EDITOR_HEIGHT);
-    let mut d = Dialog::new(ui, name, width, height)?;
+    let title = lane.as_ref().map_or("New lane", |lane| lane.name);
+    let mut d = Dialog::new(ui, title, width, height)?;
+    d.set_owner(owner);
     let mut rows = Rows::new(Bounds::new(0, 0, width, height).inset(16), 8);
+    let [label, field] = rows.next(28).columns([Size::Fixed(60), Size::Fill(1)], 8);
+    d.add_label("Name", label)?;
+    let name = d.add_edit(EditStyle::default(), field)?;
     let [label, pick] = rows.next(26).columns([Size::Fixed(60), Size::Fill(1)], 8);
     d.add_label("Color", label)?;
     let color = d.add_drop_down(pick)?;
     d.set_items(color, &color_names());
-    d.set_selected(color, Some(color_index(tint)));
-    let sizes = [Size::Fill(1), Size::Fixed(80), Size::Fixed(80)];
-    let [_, cancel, save] = rows.next(30).columns(sizes, 8);
+    d.set_selected(color, Some(color_index(lane.as_ref().and_then(|l| l.tint))));
+    d.set_text(name, lane.as_ref().map_or("", |l| l.name));
+    let sizes = [
+        Size::Fixed(80),
+        Size::Fill(1),
+        Size::Fixed(80),
+        Size::Fixed(80),
+    ];
+    let [delete, _, cancel, save] = rows.next(30).columns(sizes, 8);
+    let delete = match &lane {
+        Some(lane) if !lane.fixed => Some(d.add_button("Delete", delete)?),
+        _ => None,
+    };
     let cancel = d.add_button("Cancel", cancel)?;
     let save = d.add_button("Save", save)?;
+    d.focus(name);
 
     let mut chosen = None;
-    d.run(|d, event| match event {
-        Event::Clicked(id) if id == save => {
-            chosen = Some(color_at(d.selected(color)));
-            Flow::Close
+    d.run(|d, event| {
+        match event {
+            Event::Close => return Flow::Close,
+            Event::Clicked(id) if id == cancel => return Flow::Close,
+            Event::Clicked(id) if delete.is_some_and(|delete| id == delete) => {
+                let Some(lane) = &lane else {
+                    return Flow::Continue;
+                };
+                if lane.locked {
+                    let why = "This lane has cards that you cannot delete. \
+                               Move them to another lane first.";
+                    d.warn(title, why);
+                    return Flow::Continue;
+                }
+                if lane.cards > 0 && !d.confirm(title, &delete_question(lane.cards)) {
+                    return Flow::Continue;
+                }
+                chosen = Some(LaneEdit::Delete);
+                return Flow::Close;
+            }
+            Event::Clicked(id) if id == save => {}
+            Event::Submit => {}
+            _ => return Flow::Continue,
         }
-        Event::Submit => {
-            chosen = Some(color_at(d.selected(color)));
-            Flow::Close
+        let text = d.text(name).trim().to_owned();
+        if text.is_empty() {
+            d.warn(title, "Give the lane a name.");
+            return Flow::Continue;
         }
-        Event::Clicked(id) if id == cancel => Flow::Close,
-        Event::Close => Flow::Close,
-        _ => Flow::Continue,
+        chosen = Some(LaneEdit::Save {
+            name: text,
+            tint: color_at(d.selected(color)),
+        });
+        Flow::Close
     })?;
     Ok(chosen)
 }
 
+/// The title of the window of a card.
+fn editor_title(card: &CardData, new: bool) -> &str {
+    match card.title.as_str() {
+        _ if new => "New card",
+        "" => "Card",
+        title => title,
+    }
+}
+
 /// Show the window of a card, and wait until it closes. `None` means that the user changed
 /// nothing. A new card has only Save and Cancel.
-fn editor(ui: &Ui, card: &CardData, new: bool) -> Result<Option<Edit>> {
-    let name = if new { "New card" } else { "Card" };
+fn editor(ui: &Ui, owner: &Window, card: &CardData, new: bool) -> Result<Option<Edit>> {
+    let name = editor_title(card, new);
     let mut d = Dialog::new(ui, name, EDITOR_WIDTH, EDITOR_HEIGHT)?;
+    d.set_owner(owner);
     let mut rows = Rows::new(Bounds::new(0, 0, EDITOR_WIDTH, EDITOR_HEIGHT).inset(16), 8);
     d.add_label("Title", rows.next(20))?;
     let title = d.add_edit(EditStyle::default(), rows.next(28))?;
@@ -730,10 +967,10 @@ fn editor(ui: &Ui, card: &CardData, new: bool) -> Result<Option<Edit>> {
     d.set_text(body, &card.body.replace('\n', "\r\n"));
 
     let sizes = [
-        Size::Fixed(72),
-        Size::Fixed(72),
-        Size::Fixed(80),
-        Size::Fixed(72),
+        Size::Fixed(32),
+        Size::Fixed(32),
+        Size::Fixed(32),
+        Size::Fixed(32),
         Size::Fill(1),
         Size::Fixed(80),
         Size::Fixed(80),
@@ -741,12 +978,24 @@ fn editor(ui: &Ui, card: &CardData, new: bool) -> Result<Option<Edit>> {
     let [pin, clone, archive, delete, _, cancel, save] = rows.next(30).columns(sizes, 8);
     let mut actions = Vec::new();
     if !new {
-        let pin_name = if card.pinned { "Unpin" } else { "Pin" };
-        let archive_name = if card.archived { "Restore" } else { "Archive" };
-        actions.push((d.add_button(pin_name, pin)?, Action::Pin));
-        actions.push((d.add_button("Clone", clone)?, Action::Clone));
-        actions.push((d.add_button(archive_name, archive)?, Action::Archive));
-        actions.push((d.add_button("Delete", delete)?, Action::Delete));
+        let (pin_icon, pin_name) = if card.pinned {
+            (UNPIN_ICON, "Unpin")
+        } else {
+            (PIN_ICON, "Pin")
+        };
+        let (archive_icon, archive_name) = if card.archived {
+            (RESTORE_ICON, "Restore")
+        } else {
+            (ARCHIVE_ICON, "Archive")
+        };
+        for (icon, name, bounds, action) in [
+            (pin_icon, pin_name, pin, Action::Pin),
+            (CLONE_ICON, "Clone", clone, Action::Clone),
+            (archive_icon, archive_name, archive, Action::Archive),
+            (DELETE_ICON, "Delete", delete, Action::Delete),
+        ] {
+            actions.push((d.add_icon_button(icon, name, bounds)?, action));
+        }
     }
     let cancel = d.add_button("Cancel", cancel)?;
     actions.push((d.add_button("Save", save)?, Action::Save));
@@ -864,6 +1113,34 @@ mod tests {
         assert_eq!(model.remove(b), None);
         assert_eq!(titles(&model, 0, false), ["A", "A", "C"]);
         assert_eq!(model.clone_card(b), None);
+    }
+
+    #[test]
+    fn a_lane_is_added_at_the_end_and_removed_with_its_cards() {
+        let (mut model, [a, _, _, d]) = model();
+        assert_eq!(model.add_lane(), 2);
+        assert!(model.move_to(a, 2, 0, false));
+        assert_eq!(titles(&model, 2, false), ["A"]);
+        let cards = model.remove_lane(0).unwrap();
+        let removed: Vec<&str> = cards.iter().map(|card| card.title.as_str()).collect();
+        assert_eq!(removed, ["B", "C"]);
+        assert_eq!(model.find(d), Some((0, 0)));
+        assert_eq!(model.find(a), Some((1, 0)));
+        assert_eq!(model.remove_lane(2), None);
+    }
+
+    #[test]
+    fn the_window_of_a_card_has_the_title_of_the_card() {
+        let card = CardData::new("Write the plan", "");
+        assert_eq!(editor_title(&card, false), "Write the plan");
+        assert_eq!(editor_title(&CardData::default(), false), "Card");
+        assert_eq!(editor_title(&card, true), "New card");
+    }
+
+    #[test]
+    fn the_question_counts_the_cards_of_the_lane() {
+        assert_eq!(delete_question(1), "Delete this lane and its card?");
+        assert!(delete_question(3).contains("its 3 cards"));
     }
 
     #[test]

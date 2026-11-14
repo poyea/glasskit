@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 //! A kanban board: drag a card to another place or lane, and click a card to change it, or
-//! to clone, pin, archive, or delete it.
+//! to clone, pin, archive, or delete it. The right button of the mouse on a card shows the
+//! same commands. "Add lane" adds a lane, and the button with three dots of a lane changes
+//! or deletes it.
 //!
 //! Run it with `cargo run -p glasskit --example kanban`. It prints what the user does.
 
@@ -38,8 +40,16 @@ fn main() -> glasskit::Result<()> {
 
     let title = window.add(Text::new("Board").style(TextStyle::Title));
     let gap = window.add(Spacer::fill());
+    let add_lane = window.add(Button::new("Add lane"));
     let archived = window.add(Button::new("Show archived"));
-    let top = window.add(Row::new().child(title).child(gap).child(archived));
+    let top = window.add(
+        Row::new()
+            .gap(8.0)
+            .child(title)
+            .child(gap)
+            .child(add_lane)
+            .child(archived),
+    );
     let root = window.add(
         Column::new()
             .padding(Insets::all(16.0))
@@ -65,6 +75,11 @@ fn main() -> glasskit::Result<()> {
                                 "Show archived"
                             };
                             window.set_text(archived, label);
+                        }
+                        WindowEvent::Clicked(id) if id == add_lane => {
+                            if let Some(change) = board.add_lane_by_user(&ui, &mut window)? {
+                                println!("{}", describe(&board, &change));
+                            }
                         }
                         event => {
                             if let Some(change) = board.handle(&ui, &mut window, &event)? {
@@ -97,6 +112,15 @@ fn describe(board: &Board, change: &BoardEvent) -> String {
         BoardEvent::Pinned(key) => format!("pinned {}", title(key)),
         BoardEvent::Archived(key) => format!("archived {}", title(key)),
         BoardEvent::Deleted { card, .. } => format!("deleted {}", card.title),
+        BoardEvent::LaneAdded(lane) => {
+            format!("added the lane {}", board.lane_name(*lane).unwrap_or(""))
+        }
+        BoardEvent::LaneChanged(lane) => {
+            format!("changed the lane {}", board.lane_name(*lane).unwrap_or(""))
+        }
+        BoardEvent::LaneRemoved { name, cards, .. } => {
+            format!("deleted the lane {name} with {} cards", cards.len())
+        }
         _ => String::new(),
     }
 }
