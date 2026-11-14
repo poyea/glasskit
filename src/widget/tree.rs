@@ -25,6 +25,8 @@ pub(crate) const TEXT_BOX_PADDING: (f32, f32) = (11.0, 6.0);
 /// The width of a text box with [`Length::Auto`], in DIPs.
 const TEXT_BOX_WIDTH: f32 = 200.0;
 const TEXT_BOX_MIN_HEIGHT: f32 = 32.0;
+/// The space between the title and the body of a card, in DIPs.
+const CARD_TEXT_GAP: f32 = 4.0;
 
 /// A rectangle in DIPs.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -102,8 +104,12 @@ pub(crate) enum Content {
     },
     /// The button of a side bar.
     SideToggle,
-    /// A panel behind the children.
-    Card,
+    /// A panel behind the children. A card with a text has its title and its body as its
+    /// first two children.
+    Card {
+        text: Option<(String, String)>,
+        pinned: bool,
+    },
     /// A column that scrolls up and down when its children are higher than it.
     Scroll {
         /// How far the children are scrolled up, in DIPs.
@@ -120,6 +126,13 @@ pub(crate) enum Content {
 }
 
 impl Content {
+    pub fn card() -> Self {
+        Content::Card {
+            text: None,
+            pinned: false,
+        }
+    }
+
     pub fn interactive(&self) -> bool {
         matches!(
             self,
@@ -208,14 +221,24 @@ pub(crate) struct Tree {
 
 impl Tree {
     /// Add a widget. Its children move out of any container that held them before.
-    pub fn add(&mut self, node: Node) -> usize {
+    pub fn add(&mut self, mut node: Node) -> usize {
         let limit = self.nodes.len();
-        let head = match &node.content {
-            Content::SideBar { title, .. } => Some(self.add_side_head(title.clone())),
-            _ => None,
+        let mut children: Vec<usize> = match &node.content {
+            Content::SideBar { title, .. } => vec![self.add_side_head(title.clone())],
+            Content::Card {
+                text: Some((title, body)),
+                ..
+            } => self.add_card_text(title.clone(), body.clone()),
+            _ => Vec::new(),
         };
+        if let (Content::Card { text: Some(_), .. }, Some(c)) = (&node.content, &mut node.container)
+        {
+            c.axis = Axis::Column;
+            if c.gap == 0.0 {
+                c.gap = CARD_TEXT_GAP;
+            }
+        }
         let index = self.nodes.len();
-        let mut children: Vec<usize> = head.into_iter().collect();
         for &child in node.children() {
             if child < limit && !children.contains(&child) {
                 children.push(child);
@@ -237,6 +260,54 @@ impl Tree {
         }
         self.apply_side(index);
         index
+    }
+
+    fn add_card_text(&mut self, title: String, body: String) -> Vec<usize> {
+        let title = self.add(Node::leaf(Content::Text {
+            text: title,
+            style: TextStyle::BodyStrong,
+        }));
+        let mut text = Node::leaf(Content::Text {
+            text: body,
+            style: TextStyle::Body,
+        });
+        text.visible = !matches!(&text.content, Content::Text { text, .. } if text.is_empty());
+        let body = self.add(text);
+        vec![title, body]
+    }
+
+    pub fn card_text(&self, card: usize) -> Option<(String, String)> {
+        match &self.nodes.get(card)?.content {
+            Content::Card { text, .. } => text.clone(),
+            _ => None,
+        }
+    }
+
+    /// Change the title and the body of a card that has a text.
+    pub fn set_card_text(&mut self, card: usize, title: &str, body: &str) {
+        let Some(Content::Card {
+            text: Some(text), ..
+        }) = self.nodes.get_mut(card).map(|n| &mut n.content)
+        else {
+            return;
+        };
+        *text = (title.to_owned(), body.to_owned());
+        let &[title_node, body_node, ..] = self.nodes[card].children() else {
+            return;
+        };
+        for (node, value) in [(title_node, title), (body_node, body)] {
+            if let Content::Text { text, .. } = &mut self.nodes[node].content {
+                *text = value.to_owned();
+            }
+        }
+        self.nodes[body_node].visible = !body.is_empty();
+    }
+
+    pub fn set_pinned(&mut self, card: usize, to: bool) {
+        if let Some(Content::Card { pinned, .. }) = self.nodes.get_mut(card).map(|n| &mut n.content)
+        {
+            *pinned = to;
+        }
     }
 
     fn add_side_head(&mut self, title: String) -> usize {
@@ -683,9 +754,10 @@ impl Tree {
 
 fn intrinsic(content: &Content, compact: bool, max_w: f32, m: &dyn Measure) -> (f32, f32) {
     match content {
-        Content::Blank | Content::Card | Content::Scroll { .. } | Content::SideBar { .. } => {
-            (0.0, 0.0)
-        }
+        Content::Blank
+        | Content::Card { .. }
+        | Content::Scroll { .. }
+        | Content::SideBar { .. } => (0.0, 0.0),
         Content::SideToggle => (SIDE_COMPACT_WIDTH, NAV_ITEM_HEIGHT),
         Content::NavItem { .. } if compact => (SIDE_COMPACT_WIDTH, NAV_ITEM_HEIGHT),
         Content::Text { text, style } => m.text(text, *style, max_w),
@@ -967,6 +1039,38 @@ mod tests {
         t.nodes[head].children()[0]
     }
 
+    fn card(title: &str, body: &str) -> Node {
+        Node::container(
+            Content::Card {
+                text: Some((title.into(), body.into())),
+                pinned: false,
+            },
+            Axis::Stack,
+            Align::Stretch,
+        )
+    }
+
+    #[test]
+    fn a_card_with_a_text_stacks_its_title_and_its_body() {
+        let mut t = Tree::default();
+        let extra = t.add(button("Open"));
+        let c = t.add(with(card("Plan", "Write it"), &[extra]));
+        t.root = Some(c);
+        t.layout(200.0, 200.0, &Fixed);
+        let [title, body, last] = t.nodes[c].children() else {
+            panic!("a card with a text has its texts before its children");
+        };
+        assert_eq!(*last, extra);
+        assert_eq!(t.nodes[*title].rect, Rect::new(0.0, 0.0, 200.0, 20.0));
+        assert_eq!(t.nodes[*body].rect, Rect::new(0.0, 24.0, 200.0, 20.0));
+        assert_eq!(t.card_text(c), Some(("Plan".into(), "Write it".into())));
+
+        t.set_card_text(c, "Plan B", "");
+        t.layout(200.0, 200.0, &Fixed);
+        assert_eq!(t.card_text(c), Some(("Plan B".into(), String::new())));
+        assert_eq!(t.nodes[extra].rect.y, 24.0);
+    }
+
     #[test]
     fn a_side_bar_has_a_width_for_each_mode() {
         let (mut t, bar, items, page) = side_bar(&SideMode::ALL, "App");
@@ -1075,7 +1179,7 @@ mod tests {
         let a = t.add(text("a"));
         let b = t.add(text("b"));
         let mut col = with(
-            Node::container(Content::Card, Axis::Column, Align::Start),
+            Node::container(Content::card(), Axis::Column, Align::Start),
             &[a, b],
         );
         let c = col.container.as_mut().unwrap();

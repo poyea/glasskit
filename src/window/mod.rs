@@ -384,6 +384,28 @@ impl Window {
         self.state().invalidate(self.hwnd());
     }
 
+    /// The title and the body of a card. They are empty for a card without a text.
+    pub fn card_text(&self, id: Id<kind::Card>) -> (String, String) {
+        let text = self.state().tree.borrow().card_text(id.index);
+        text.unwrap_or_default()
+    }
+
+    /// Change the title and the body of a card that was made with a title or a body. A card
+    /// with an empty body shows only its title.
+    pub fn set_card_text(&mut self, id: Id<kind::Card>, title: &str, body: &str) {
+        self.state()
+            .tree
+            .borrow_mut()
+            .set_card_text(id.index, title, body);
+        self.state().invalidate(self.hwnd());
+    }
+
+    /// Show or hide the pin in the corner of a card.
+    pub fn set_pinned(&mut self, id: Id<kind::Card>, pinned: bool) {
+        self.state().tree.borrow_mut().set_pinned(id.index, pinned);
+        self.state().invalidate(self.hwnd());
+    }
+
     /// Change how much of a side bar shows. It gives no
     /// [`WindowEvent::SideModeChanged`].
     pub fn set_side_mode(&mut self, id: Id<kind::SideBar>, mode: SideMode) {

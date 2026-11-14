@@ -35,6 +35,9 @@ const NAV_MARK: (f32, f32) = (3.0, 16.0);
 const FOCUS_GAP: f32 = 3.0;
 const FOCUS_WIDTH: f32 = 2.0;
 const ICON_SIZE: f32 = 16.0;
+/// The pin of a pinned card, in the icon font, and the size of its corner, in DIPs.
+const PIN_ICON: &str = "\u{E718}";
+const PIN_CORNER: f32 = 30.0;
 /// The three lines of the button of a side bar, in the icon font.
 const SIDE_TOGGLE_ICON: &str = "\u{E700}";
 
@@ -194,7 +197,20 @@ fn widget(
                 focus_ring(dc, theme, r)?;
             }
         }
-        Content::Card => panel(dc, r, CARD_RADIUS, theme.card, theme.card_border)?,
+        Content::Card { pinned, .. } => {
+            panel(dc, r, CARD_RADIUS, theme.card, theme.card_border)?;
+            if *pinned {
+                let corner = Rect::new(r.x + r.w - PIN_CORNER, r.y, PIN_CORNER, PIN_CORNER);
+                draw_text(
+                    dc,
+                    formats,
+                    PIN_ICON,
+                    &formats.icon,
+                    corner,
+                    theme.subtle_text,
+                )?;
+            }
+        }
         Content::Text { text, style } => {
             let color = if node.enabled {
                 theme.text

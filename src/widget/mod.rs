@@ -639,6 +639,11 @@ impl Default for Stack {
 
 /// A panel with a light fill and a thin border, around its children. Its children are on
 /// top of each other, as in a [`Stack`], with 16 DIPs of padding.
+///
+/// A card can have a text of its own: a [`title`](Card::title) and a [`body`](Card::body).
+/// Then the title, the body, and the children are one under the other. Read and change the
+/// text with [`Window::card_text`](crate::window::Window::card_text) and
+/// [`Window::set_card_text`](crate::window::Window::set_card_text).
 #[derive(Debug)]
 pub struct Card {
     node: Node,
@@ -647,11 +652,46 @@ pub struct Card {
 impl Card {
     /// An empty card.
     pub fn new() -> Self {
-        let mut node = Node::container(Content::Card, Axis::Stack, Align::Stretch);
+        let mut node = Node::container(Content::card(), Axis::Stack, Align::Stretch);
         if let Some(c) = &mut node.container {
             c.padding = Insets::all(16.0);
         }
         Self { node }
+    }
+
+    fn text_mut(&mut self) -> Option<&mut (String, String)> {
+        match &mut self.node.content {
+            Content::Card { text, .. } => Some(text.get_or_insert_default()),
+            _ => None,
+        }
+    }
+
+    /// A title at the top of the card, in semibold.
+    #[must_use]
+    pub fn title(mut self, title: impl Into<String>) -> Self {
+        if let Some(text) = self.text_mut() {
+            text.0 = title.into();
+        }
+        self
+    }
+
+    /// A text below the title. It wraps to the width of the card.
+    #[must_use]
+    pub fn body(mut self, body: impl Into<String>) -> Self {
+        if let Some(text) = self.text_mut() {
+            text.1 = body.into();
+        }
+        self
+    }
+
+    /// Show a pin in the top right corner. Change it with
+    /// [`Window::set_pinned`](crate::window::Window::set_pinned).
+    #[must_use]
+    pub fn pinned(mut self, pinned: bool) -> Self {
+        if let Content::Card { pinned: p, .. } = &mut self.node.content {
+            *p = pinned;
+        }
+        self
     }
 
     sizes!();
