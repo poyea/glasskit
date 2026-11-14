@@ -13,6 +13,8 @@
 //!   taking the keyboard focus, can show whether a choice was correct, and can dismiss itself.
 //! - [`dialog`]: a small modal window made of standard controls, in the same colors.
 //! - [`layout`]: rows and columns that place the controls of a dialog.
+//! - [`window`] and [`widget`]: a glass window with a tree of widgets.
+//! - [`kanban`]: a board with lanes of cards that the user drags, edits, pins, and archives.
 //! - [`placement`]: where a window shows, as fractions of the free space of the screen.
 //! - [`autostart`], [`presence`], [`process`], [`single_instance`], and [`show_error`]: small
 //!   helpers that tray apps often need.
@@ -106,6 +108,7 @@ mod edit;
 pub mod error;
 pub mod events;
 mod handle;
+pub mod kanban;
 pub mod layout;
 mod native;
 pub mod placement;

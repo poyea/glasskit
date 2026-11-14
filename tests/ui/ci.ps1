@@ -29,6 +29,7 @@ public static class GlassUi {
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint m, IntPtr w, IntPtr l);
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
 }
 '@
@@ -206,6 +207,50 @@ foreach ($mode in @('expanded', 'icons', 'collapsed')) {
         } finally {
             Stop-App $p
         }
+    }
+}
+
+Step 'kanban' {
+    # Only posted pointer messages: drag the first card of the first lane to the end of the
+    # last lane, then click the card that stays, which opens its window.
+    $log = Join-Path $Out 'kanban.txt'
+    $p = Start-Process (Join-Path $bin 'kanban.exe') -PassThru -RedirectStandardOutput $log
+    try {
+        $hwnd = Find-Window $p 'GlasskitWindow'
+        Start-Sleep -Milliseconds 800
+        Set-OnTop $hwnd
+        Save-Picture $hwnd 'kanban' -FromScreen
+        $scale = [GlassUi]::GetDpiForWindow($hwnd) / 96.0
+        # A pointer message at a place in DIPs. The button is down for all but the release.
+        $pointer = {
+            param($message, $x, $y)
+            $place = ([int] ($y * $scale) -shl 16) -bor [int] ($x * $scale)
+            $down = if ($message -eq 0x0202) { 0 } else { 1 }
+            [GlassUi]::PostMessageW($hwnd, $message, [IntPtr] $down, [IntPtr] $place) | Out-Null
+        }
+        & $pointer 0x0201 143 148
+        & $pointer 0x0200 160 160
+        & $pointer 0x0200 400 300
+        & $pointer 0x0200 676 400
+        Start-Sleep -Milliseconds 400
+        Save-Picture $hwnd 'kanban-drag' -FromScreen
+        & $pointer 0x0202 676 400
+        Start-Sleep -Milliseconds 400
+        Save-Picture $hwnd 'kanban-moved' -FromScreen
+        $text = (Get-Content $log -Raw).Trim()
+        $want = 'moved Write the plan to Done at 2'
+        if ($text -ne $want) { throw "The app printed '$text', not '$want'." }
+
+        & $pointer 0x0201 143 136
+        & $pointer 0x0202 143 136
+        $card = Find-Window $p 'GlasskitDialog'
+        Start-Sleep -Milliseconds 800
+        Save-Picture $card 'kanban-card'
+        [GlassUi]::PostMessageW($card, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+        Start-Sleep -Milliseconds 300
+        if ($p.HasExited) { throw 'The board ended when the window of the card closed.' }
+    } finally {
+        Stop-App $p
     }
 }
 

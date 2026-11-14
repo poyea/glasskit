@@ -726,6 +726,7 @@ impl Default for Stack {
 /// [`Window::set_card_text`](crate::window::Window::set_card_text).
 ///
 /// A card can also be [`clickable`](Card::clickable) and [`draggable`](Card::draggable).
+/// For a board of cards with these functions, see [`kanban`](crate::kanban).
 #[derive(Debug)]
 pub struct Card {
     node: Node,
