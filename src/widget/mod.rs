@@ -684,6 +684,15 @@ impl Card {
         self
     }
 
+    /// Let the user click the card. A click, Space, or Enter on it gives
+    /// [`WindowEvent::Clicked`](crate::window::WindowEvent::Clicked). A click on a button in
+    /// the card goes to the button.
+    #[must_use]
+    pub fn clickable(mut self) -> Self {
+        self.node.clickable = true;
+        self
+    }
+
     /// Show a pin in the top right corner. Change it with
     /// [`Window::set_pinned`](crate::window::Window::set_pinned).
     #[must_use]

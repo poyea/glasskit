@@ -172,6 +172,8 @@ pub(crate) struct Node {
     pub parent: Option<usize>,
     /// Where the last layout put the widget.
     pub rect: Rect,
+    /// A click on the widget gives an event, and Tab moves to it.
+    pub clickable: bool,
 }
 
 impl Node {
@@ -185,6 +187,7 @@ impl Node {
             visible: true,
             parent: None,
             rect: Rect::default(),
+            clickable: false,
         }
     }
 
@@ -763,9 +766,9 @@ impl Tree {
     }
 
     pub fn focusable(&self, index: usize) -> bool {
-        self.nodes
-            .get(index)
-            .is_some_and(|n| n.enabled && n.content.interactive() && self.shown(index))
+        self.nodes.get(index).is_some_and(|n| {
+            n.enabled && (n.content.interactive() || n.clickable) && self.shown(index)
+        })
     }
 
     /// Whether a widget is in the tree under the root, and it and all widgets around it are
@@ -1127,6 +1130,20 @@ mod tests {
         t.layout(200.0, 200.0, &Fixed);
         assert_eq!(t.card_text(c), Some(("Plan B".into(), String::new())));
         assert_eq!(t.nodes[extra].rect.y, 24.0);
+    }
+
+    #[test]
+    fn a_click_on_a_card_goes_to_the_card_or_to_its_button() {
+        let mut t = Tree::default();
+        let open = t.add(button("Open"));
+        let mut node = with(card("Plan", ""), &[open]);
+        node.clickable = true;
+        let c = t.add(node);
+        t.root = Some(c);
+        t.layout(200.0, 200.0, &Fixed);
+        assert_eq!(t.focus_order(), [c, open]);
+        assert_eq!(t.hit(5.0, 5.0), Some(c));
+        assert_eq!(t.hit(5.0, 30.0), Some(open));
     }
 
     #[test]

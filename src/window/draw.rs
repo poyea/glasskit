@@ -198,7 +198,13 @@ fn widget(
             }
         }
         Content::Card { pinned, .. } => {
-            panel(dc, r, CARD_RADIUS, theme.card, theme.card_border)?;
+            let hover = node.clickable && now.hover == Some(index);
+            let fill = match (hover, now.pressed == Some(index)) {
+                (true, true) => theme.button_pressed,
+                (true, false) => theme.button_hover,
+                (false, _) => theme.card,
+            };
+            panel(dc, r, CARD_RADIUS, fill, theme.card_border)?;
             if *pinned {
                 let corner = Rect::new(r.x + r.w - PIN_CORNER, r.y, PIN_CORNER, PIN_CORNER);
                 draw_text(
@@ -209,6 +215,9 @@ fn widget(
                     corner,
                     theme.subtle_text,
                 )?;
+            }
+            if node.clickable && now.cues && now.focus == Some(index) {
+                focus_ring(dc, theme, r)?;
             }
         }
         Content::Text { text, style } => {
