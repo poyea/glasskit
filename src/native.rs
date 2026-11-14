@@ -13,9 +13,10 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
 use windows::Win32::UI::Input::KeyboardAndMouse::{TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, IsWindow, LoadCursorW,
-    RegisterClassExW, SW_SHOWNORMAL, SetForegroundWindow, SetWindowLongPtrW, ShowWindow,
-    WNDCLASSEXW, WNDPROC, WS_EX_TOOLWINDOW, WS_POPUP,
+    CreateWindowExW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, IsIconic, IsWindow,
+    LoadCursorW, RegisterClassExW, SW_HIDE, SW_RESTORE, SW_SHOW, SW_SHOWNORMAL,
+    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, WNDCLASSEXW, WNDPROC, WS_EX_TOOLWINDOW,
+    WS_POPUP,
 };
 use windows::core::PCWSTR;
 
@@ -98,6 +99,25 @@ pub(crate) fn show_window(hwnd: HWND) {
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = ShowWindow(hwnd, SW_SHOWNORMAL);
         let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+/// Show a window that the app hid, in the state that it had, and bring it to the front.
+pub(crate) fn show_again(hwnd: HWND) {
+    unsafe {
+        let how = if IsIconic(hwnd).as_bool() {
+            SW_RESTORE
+        } else {
+            SW_SHOW
+        };
+        let _ = ShowWindow(hwnd, how);
+        let _ = SetForegroundWindow(hwnd);
+    }
+}
+
+pub(crate) fn hide_window(hwnd: HWND) {
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
     }
 }
 

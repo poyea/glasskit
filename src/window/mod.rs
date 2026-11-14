@@ -62,7 +62,7 @@ use windows::Win32::Graphics::Dwm::{
     DWM_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_USE_HOSTBACKDROPBRUSH, DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea,
 };
-use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
+use windows::Win32::Graphics::Gdi::{ClientToScreen, ScreenToClient, ValidateRect};
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForWindow};
 use windows::Win32::UI::Input::Ime::{
@@ -84,7 +84,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SETTINGCHANGE, WM_SIZE, WM_SYSCOLORCHANGE, WM_SYSKEYDOWN, WM_THEMECHANGED, WM_TIMER,
     WS_EX_APPWINDOW, WS_EX_NOREDIRECTIONBITMAP, WS_OVERLAPPEDWINDOW,
 };
-use windows::Win32::UI::WindowsAndMessaging::{ICON_BIG, ICON_SMALL, SendMessageW, WM_SETICON};
+use windows::Win32::UI::WindowsAndMessaging::{
+    ICON_BIG, ICON_SMALL, SendMessageW, WM_CONTEXTMENU, WM_SETICON,
+};
 use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::Ui;
@@ -95,7 +97,7 @@ use crate::events::WindowId;
 use crate::native::{self, NativeWindow, state_of};
 use crate::render::Graphics;
 use crate::theme::Theme;
-use crate::tray::{Icon, IconHandle};
+use crate::tray::{self, Icon, IconHandle, MenuItem};
 use crate::ui::Notice;
 use crate::widget::tree::{Content, Tree};
 use crate::widget::{AnyId, Element, HasText, Id, SideMode, Tint, kind};
@@ -160,6 +162,10 @@ pub enum WindowEvent {
         /// card: 0 is before the first child.
         index: usize,
     },
+    /// The user asked for the menu of a widget that takes clicks: with the right button of
+    /// the mouse, or with the menu key or Shift+F10 on the widget that has the focus. Show
+    /// the menu with [`Window::menu`].
+    ContextRequested(AnyId),
     /// The user clicked the close button or pressed Alt+F4. The window stays until the app
     /// drops it.
     CloseRequested,
@@ -208,6 +214,10 @@ struct State {
     blink_since: Cell<Instant>,
     /// The theme and material that the background shows now.
     applied: Cell<Option<(Theme, Material)>>,
+    /// [`Window::show`] ran.
+    shown: Cell<bool>,
+    /// Where the user asked for a menu, on the screen, in pixels.
+    menu_at: Cell<Option<POINT>>,
 }
 
 /// A press of the left button on a widget that the user can drag.
@@ -304,6 +314,8 @@ impl Window {
             grab: Cell::new(None),
             blink_since: Cell::new(Instant::now()),
             applied: Cell::new(None),
+            shown: Cell::new(false),
+            menu_at: Cell::new(None),
         };
         let native = NativeWindow::attach(hwnd, Rc::new(state));
         guard.disarm();
@@ -321,7 +333,7 @@ impl Window {
         self.native.state()
     }
 
-    fn hwnd(&self) -> HWND {
+    pub(crate) fn hwnd(&self) -> HWND {
         self.native.hwnd()
     }
 
@@ -330,9 +342,37 @@ impl Window {
         self.id
     }
 
-    /// Show the window and bring it to the front.
+    /// Show the window and bring it to the front. After [`Window::hide`], the window
+    /// comes back in the place and the size that it had.
     pub fn show(&self) {
-        native::show_window(self.hwnd());
+        if self.state().shown.replace(true) {
+            native::show_again(self.hwnd());
+        } else {
+            native::show_window(self.hwnd());
+        }
+    }
+
+    /// Hide the window, and its button on the taskbar. The window stays as it is, and
+    /// [`Window::show`] shows it again. An app with a [`Tray`](crate::tray::Tray) can thus
+    /// go on without a window.
+    pub fn hide(&self) {
+        native::hide_window(self.hwnd());
+    }
+
+    /// Show a menu and wait until the user picks an item or closes the menu. It gives the
+    /// command of the item. After [`WindowEvent::ContextRequested`], the menu shows where
+    /// the user asked for it; else it shows at the pointer.
+    ///
+    /// A [`MenuItem::Quit`] ends the app, as in the menu of a tray.
+    pub fn menu<C: Clone>(&self, items: &[MenuItem<C>]) -> Option<C> {
+        let at = self.state().menu_at.take().unwrap_or_else(|| {
+            let mut at = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut at);
+            }
+            at
+        });
+        tray::popup_menu(self.hwnd(), at, items)
     }
 
     /// Add a widget, and give its id. It shows when it is in the tree under the root.
@@ -651,6 +691,37 @@ impl State {
                 index: place.index,
             });
         }
+    }
+
+    /// Handle `WM_CONTEXTMENU`. It gives false when no widget is there.
+    fn context(&self, hwnd: HWND, lparam: LPARAM) -> bool {
+        // The keyboard gives no point: the menu is for the widget with the focus.
+        let found = if lparam.0 as u32 == u32::MAX {
+            let tree = self.tree.borrow();
+            let focus = self.now.get().focus.filter(|&f| tree.focusable(f));
+            focus.map(|focus| {
+                let (r, s) = (tree.nodes[focus].rect, self.scale.get());
+                let mut at = POINT {
+                    x: ((r.x + r.w / 2.0) * s).round() as i32,
+                    y: ((r.y + r.h / 2.0) * s).round() as i32,
+                };
+                unsafe {
+                    let _ = ClientToScreen(hwnd, &mut at);
+                }
+                (focus, at)
+            })
+        } else {
+            let (x, y) = native::point(lparam);
+            let at = POINT { x, y };
+            let (x, y) = self.screen_point(hwnd, at);
+            self.tree.borrow().hit(x, y).map(|hit| (hit, at))
+        };
+        let Some((index, at)) = found else {
+            return false;
+        };
+        self.menu_at.set(Some(at));
+        self.push(WindowEvent::ContextRequested(AnyId(index)));
+        true
     }
 
     fn is_dragging(&self) -> bool {
@@ -1391,6 +1462,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     DefWindowProcW(hwnd, msg, wparam, lparam)
                 }
             }
+            WM_CONTEXTMENU if state.context(hwnd, lparam) => LRESULT(0),
             WM_IME_STARTCOMPOSITION => {
                 state.place_ime(hwnd);
                 DefWindowProcW(hwnd, msg, wparam, lparam)

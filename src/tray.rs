@@ -19,16 +19,16 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
-    Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_USER, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NIN_BALLOONUSERCLICK, NOTIFYICONDATAW, Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconIndirect, CreatePopupMenu, DefWindowProcW, DestroyIcon, DestroyMenu,
     GetCursorPos, GetSystemMetrics, HICON, HMENU, ICONINFO, IDC_ARROW, MENU_ITEM_FLAGS, MF_CHECKED,
     MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, PostMessageW, PostQuitMessage,
-    RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_LBUTTONUP, WM_NULL,
-    WM_RBUTTONUP,
+    RegisterWindowMessageW, SM_CXSMICON, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTALIGN, TPM_RIGHTBUTTON, TPM_TOPALIGN,
+    TRACK_POPUP_MENU_FLAGS, TrackPopupMenu, WM_APP, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
 };
 use windows::core::{BOOL, HSTRING, PCSTR, PCWSTR, w};
 
@@ -47,7 +47,10 @@ const WM_TRAY: u32 = WM_APP + 1;
 const ICON_ID: u32 = 1;
 /// Menu item ids start here. 0 means that the user closed the menu without a choice.
 const FIRST_ID: usize = 1;
-/// One item of the tray menu. `C` is the command type of the app.
+/// One item of the menu of a tray, or of a menu of a window with [`Window::menu`]. `C` is
+/// the command type of the app.
+///
+/// [`Window::menu`]: crate::window::Window::menu
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuItem<C> {
     /// An item that the user can pick. The event loop then gives [`Event::Command`](crate::events::Event::Command).
@@ -165,6 +168,9 @@ struct Shared {
     /// It changes with each new menu. A choice from an older menu is not used.
     generation: Cell<u64>,
     chosen: RefCell<VecDeque<(u64, usize)>>,
+    /// A click on the icon or on a notification gives a command, and opens no menu.
+    takes_clicks: Cell<bool>,
+    clicked: Cell<bool>,
     icon_data: RefCell<NOTIFYICONDATAW>,
     taskbar_created: u32,
 }
@@ -173,10 +179,17 @@ struct Shared {
 struct Core<C> {
     shared: Rc<Shared>,
     commands: RefCell<Vec<C>>,
+    /// The command of a click on the icon or on a notification.
+    click: RefCell<Option<C>>,
 }
 
 impl<C: Clone> Source<C> for Core<C> {
     fn take_command(&self) -> Option<C> {
+        if self.shared.clicked.take()
+            && let Some(command) = self.click.borrow().clone()
+        {
+            return Some(command);
+        }
         loop {
             let (generation, index) = self.shared.chosen.borrow_mut().pop_front()?;
             if generation == self.shared.generation.get()
@@ -233,6 +246,8 @@ impl Native {
             entries: RefCell::new(Vec::new()),
             generation: Cell::new(0),
             chosen: RefCell::new(VecDeque::new()),
+            takes_clicks: Cell::new(false),
+            clicked: Cell::new(false),
             icon_data: RefCell::new(data),
             taskbar_created: unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
         });
@@ -262,6 +277,18 @@ impl Native {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &*data);
         }
     }
+
+    fn notify(&self, title: &str, text: &str) {
+        // A copy, so that a new icon after a restart of Explorer shows no old notification.
+        let mut data = *self.window.state().icon_data.borrow();
+        data.uFlags = NIF_INFO;
+        data.dwInfoFlags = NIIF_USER;
+        copy_text(&mut data.szInfoTitle, title);
+        copy_text(&mut data.szInfo, text);
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+        }
+    }
 }
 
 impl Drop for Native {
@@ -288,6 +315,7 @@ impl<C: Clone + 'static> Tray<C> {
         let core = Rc::new(Core {
             shared: native.window.share(),
             commands: RefCell::new(Vec::new()),
+            click: RefCell::new(None),
         });
         let source: Weak<dyn Source<C>> = Rc::downgrade(&core) as Weak<dyn Source<C>>;
         events.add_source(source);
@@ -307,6 +335,22 @@ impl<C: Clone + 'static> Tray<C> {
     /// characters.
     pub fn set_tooltip(&self, tooltip: &str) {
         self.native.set_tooltip(tooltip);
+    }
+
+    /// Give a command for a click with the left button on the icon, and for a click on a
+    /// [notification](Tray::notify), for example to show the window of the app. The right
+    /// button still opens the menu. With `None`, the left button opens the menu, as at the
+    /// start.
+    pub fn set_click(&mut self, command: Option<C>) {
+        self.core.shared.takes_clicks.set(command.is_some());
+        self.core.click.replace(command);
+    }
+
+    /// Show a notification of Windows with the icon of the tray. Windows shows up to 63
+    /// characters of the title and 255 characters of the text, and shows nothing while the
+    /// user has notifications off, for example with Do not disturb.
+    pub fn notify(&self, title: &str, text: &str) {
+        self.native.notify(title, text);
     }
 }
 
@@ -340,10 +384,14 @@ fn to_entries<C: Clone>(items: &[MenuItem<C>], commands: &mut Vec<C>) -> Vec<Ent
 }
 
 fn set_tip(data: &mut NOTIFYICONDATAW, tip: &str) {
-    let max = data.szTip.len() - 1;
-    let wide: Vec<u16> = tip.encode_utf16().take(max).collect();
-    data.szTip = [0; 128];
-    data.szTip[..wide.len()].copy_from_slice(&wide);
+    copy_text(&mut data.szTip, tip);
+}
+
+/// Put a text in a field of fixed length, cut to the length, with a zero at its end.
+fn copy_text(field: &mut [u16], text: &str) {
+    let wide: Vec<u16> = text.encode_utf16().take(field.len() - 1).collect();
+    field.fill(0);
+    field[..wide.len()].copy_from_slice(&wide);
 }
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -354,7 +402,10 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
         match msg {
             WM_TRAY => {
                 let event = (lparam.0 & 0xFFFF) as u32;
-                if event == WM_LBUTTONUP || event == WM_RBUTTONUP {
+                let takes_clicks = shared.takes_clicks.get();
+                if takes_clicks && (event == WM_LBUTTONUP || event == NIN_BALLOONUSERCLICK) {
+                    shared.clicked.set(true);
+                } else if event == WM_LBUTTONUP || event == WM_RBUTTONUP {
                     show_menu(hwnd, shared);
                 }
                 LRESULT(0)
@@ -426,36 +477,59 @@ fn append_entries(menu: HMENU, entries: &[Entry], choices: &mut Vec<Choice>) {
 fn show_menu(hwnd: HWND, shared: &Shared) {
     let entries = shared.entries.borrow().clone();
     let generation = shared.generation.get();
+    let mut at = POINT::default();
     unsafe {
-        let Ok(menu) = CreatePopupMenu() else {
-            return;
-        };
-        let mut choices = Vec::new();
-        append_entries(menu, &entries, &mut choices);
+        let _ = GetCursorPos(&mut at);
+    }
+    match track(hwnd, &entries, at, TPM_BOTTOMALIGN | TPM_RIGHTALIGN) {
+        Some(Choice::Action(action)) => {
+            shared.chosen.borrow_mut().push_back((generation, action));
+        }
+        Some(Choice::Quit) => unsafe { PostQuitMessage(0) },
+        None => {}
+    }
+}
 
-        let mut pt = POINT::default();
-        let _ = GetCursorPos(&mut pt);
+/// Show a menu with a corner at a point of the screen, and wait for the choice of the user.
+fn track(
+    hwnd: HWND,
+    entries: &[Entry],
+    at: POINT,
+    corner: TRACK_POPUP_MENU_FLAGS,
+) -> Option<Choice> {
+    unsafe {
+        let menu = CreatePopupMenu().ok()?;
+        let mut choices = Vec::new();
+        append_entries(menu, entries, &mut choices);
         // Without this call, the menu does not close when the user clicks outside it.
         let _ = SetForegroundWindow(hwnd);
         let chosen = TrackPopupMenu(
             menu,
-            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RIGHTALIGN,
-            pt.x,
-            pt.y,
+            TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON | corner,
+            at.x,
+            at.y,
             None,
             hwnd,
             None,
         );
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
-
         let index = (chosen.0 as usize).wrapping_sub(FIRST_ID);
-        match choices.get(index) {
-            Some(Choice::Action(action)) => {
-                shared.chosen.borrow_mut().push_back((generation, *action));
-            }
-            Some(Choice::Quit) => PostQuitMessage(0),
-            None => {}
+        choices.get(index).copied()
+    }
+}
+
+/// Show a menu of a window at a point of the screen, and give the command that the user
+/// picked.
+pub(crate) fn popup_menu<C: Clone>(hwnd: HWND, at: POINT, items: &[MenuItem<C>]) -> Option<C> {
+    let mut commands = Vec::new();
+    let entries = to_entries(items, &mut commands);
+    allow_dark_menus(hwnd);
+    match track(hwnd, &entries, at, TPM_LEFTALIGN | TPM_TOPALIGN)? {
+        Choice::Action(index) => commands.get(index).cloned(),
+        Choice::Quit => {
+            unsafe { PostQuitMessage(0) };
+            None
         }
     }
 }
@@ -532,6 +606,15 @@ mod tests {
             Icon::from_argb(2, vec![0; 3]),
             Err(Error::InvalidIcon { size: 2, pixels: 3 })
         ));
+    }
+
+    #[test]
+    fn a_long_text_is_cut_to_its_field() {
+        let mut field = [1u16; 4];
+        copy_text(&mut field, "abcdef");
+        assert_eq!(field, [97, 98, 99, 0]);
+        copy_text(&mut field, "a");
+        assert_eq!(field, [97, 0, 0, 0]);
     }
 
     #[test]
