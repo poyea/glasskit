@@ -283,6 +283,7 @@ impl Native {
         let mut data = *self.window.state().icon_data.borrow();
         data.uFlags = NIF_INFO;
         data.dwInfoFlags = NIIF_USER;
+        data.hBalloonIcon = data.hIcon;
         copy_text(&mut data.szInfoTitle, title);
         copy_text(&mut data.szInfo, text);
         unsafe {
