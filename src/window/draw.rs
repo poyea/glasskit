@@ -364,7 +364,11 @@ fn widget(
                 focus_ring(dc, theme, r)?;
             }
         }
-        Content::Button { label, accent } => {
+        Content::Button {
+            label,
+            accent,
+            icon,
+        } => {
             let state = ButtonState {
                 hover: now.hover == Some(index),
                 pressed: now.pressed == Some(index) && now.hover == Some(index),
@@ -376,7 +380,8 @@ fn widget(
                 (true, true) => theme.on_accent,
                 (false, true) => theme.text,
             };
-            draw_text(dc, formats, label, &formats.label, r, color)?;
+            let format = if *icon { &formats.icon } else { &formats.label };
+            draw_text(dc, formats, label, format, r, color)?;
             if now.cues && now.focus == Some(index) {
                 focus_ring(dc, theme, r)?;
             }

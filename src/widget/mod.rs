@@ -411,6 +411,19 @@ impl Button {
             node: Node::leaf(Content::Button {
                 label: label.into(),
                 accent: false,
+                icon: false,
+            }),
+        }
+    }
+
+    /// A small square button that shows an icon: a character of the icon font of Windows,
+    /// Segoe Fluent Icons, such as `"\u{E710}"` for a plus sign.
+    pub fn icon(icon: impl Into<String>) -> Self {
+        Self {
+            node: Node::leaf(Content::Button {
+                label: icon.into(),
+                accent: false,
+                icon: true,
             }),
         }
     }

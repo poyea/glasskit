@@ -86,6 +86,8 @@ pub(crate) enum Content {
     Button {
         label: String,
         accent: bool,
+        /// The label is a character of the icon font.
+        icon: bool,
     },
     /// An item of a navigation list.
     NavItem {
@@ -925,6 +927,7 @@ fn intrinsic(content: &Content, compact: bool, max_w: f32, m: &dyn Measure) -> (
         Content::SideToggle => (SIDE_COMPACT_WIDTH, NAV_ITEM_HEIGHT),
         Content::NavItem { .. } if compact => (SIDE_COMPACT_WIDTH, NAV_ITEM_HEIGHT),
         Content::Text { text, style } => m.text(text, *style, max_w),
+        Content::Button { icon: true, .. } => (BUTTON_MIN.1, BUTTON_MIN.1),
         Content::Button { label, .. } => {
             let (w, h) = m.label(label);
             (
@@ -995,6 +998,7 @@ mod tests {
         Node::leaf(Content::Button {
             label: s.into(),
             accent: false,
+            icon: false,
         })
     }
 
@@ -1456,6 +1460,19 @@ mod tests {
         assert_eq!(t.next_focus(Some(a), false), Some(b));
         assert_eq!(t.next_focus(Some(b), false), Some(a));
         assert_eq!(t.next_focus(Some(a), true), Some(b));
+    }
+
+    #[test]
+    fn an_icon_button_is_a_square() {
+        let mut t = Tree::default();
+        let icon = t.add(Node::leaf(Content::Button {
+            label: "a long label".into(),
+            accent: false,
+            icon: true,
+        }));
+        let (w, h) = t.measure(icon, 500.0, 500.0, &Fixed);
+        assert_eq!(w, h);
+        assert_eq!(w, BUTTON_MIN.1);
     }
 
     #[test]
