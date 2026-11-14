@@ -116,6 +116,75 @@ impl SideMode {
     pub const ALL: [SideMode; 3] = [SideMode::Expanded, SideMode::Icons, SideMode::Collapsed];
 }
 
+/// A color for a [`Card`]. The card shows it as a light fill and a border, in a tone that
+/// fits the light and the dark mode. With high contrast, the card has no color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(missing_docs)]
+pub enum Tint {
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Teal,
+    Blue,
+    Purple,
+    Pink,
+}
+
+impl Tint {
+    /// All colors, in the order of the rainbow.
+    pub const ALL: [Tint; 8] = [
+        Tint::Red,
+        Tint::Orange,
+        Tint::Yellow,
+        Tint::Green,
+        Tint::Teal,
+        Tint::Blue,
+        Tint::Purple,
+        Tint::Pink,
+    ];
+
+    /// The name of the color in English, such as `Red`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Tint::Red => "Red",
+            Tint::Orange => "Orange",
+            Tint::Yellow => "Yellow",
+            Tint::Green => "Green",
+            Tint::Teal => "Teal",
+            Tint::Blue => "Blue",
+            Tint::Purple => "Purple",
+            Tint::Pink => "Pink",
+        }
+    }
+
+    /// The color with this name. Capital and small letters are the same.
+    pub fn from_name(name: &str) -> Option<Tint> {
+        Tint::ALL
+            .into_iter()
+            .find(|tint| tint.name().eq_ignore_ascii_case(name))
+    }
+
+    /// Red, green, and blue, each from 0 to 1.
+    pub(crate) fn rgb(self) -> (f32, f32, f32) {
+        let (r, g, b): (u8, u8, u8) = match self {
+            Tint::Red => (0xE8, 0x11, 0x23),
+            Tint::Orange => (0xF7, 0x63, 0x0C),
+            Tint::Yellow => (0xEA, 0xA3, 0x00),
+            Tint::Green => (0x10, 0x7C, 0x10),
+            Tint::Teal => (0x00, 0xB7, 0xC3),
+            Tint::Blue => (0x00, 0x78, 0xD4),
+            Tint::Purple => (0x87, 0x64, 0xB8),
+            Tint::Pink => (0xE3, 0x00, 0x8C),
+        };
+        (
+            f32::from(r) / 255.0,
+            f32::from(g) / 255.0,
+            f32::from(b) / 255.0,
+        )
+    }
+}
+
 /// Space inside the edges of a container, in DIPs.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Insets {
@@ -703,6 +772,16 @@ impl Card {
     pub fn pinned(mut self, pinned: bool) -> Self {
         if let Content::Card { pinned: p, .. } = &mut self.node.content {
             *p = pinned;
+        }
+        self
+    }
+
+    /// Give the card a color. Change it with
+    /// [`Window::set_tint`](crate::window::Window::set_tint).
+    #[must_use]
+    pub fn tint(mut self, tint: Tint) -> Self {
+        if let Content::Card { tint: t, .. } = &mut self.node.content {
+            *t = Some(tint);
         }
         self
     }

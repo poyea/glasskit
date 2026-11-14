@@ -98,7 +98,7 @@ use crate::theme::Theme;
 use crate::tray::{Icon, IconHandle};
 use crate::ui::Notice;
 use crate::widget::tree::{Content, Tree};
-use crate::widget::{AnyId, Element, HasText, Id, SideMode, kind};
+use crate::widget::{AnyId, Element, HasText, Id, SideMode, Tint, kind};
 use draw::{Dragging, Formats, Interaction};
 use scene::{Backdrop, Scene};
 use text_box::Field;
@@ -443,6 +443,12 @@ impl Window {
             .tree
             .borrow_mut()
             .set_card_text(id.index, title, body);
+        self.state().invalidate(self.hwnd());
+    }
+
+    /// Give a card a color, or take its color away.
+    pub fn set_tint(&mut self, id: Id<kind::Card>, tint: Option<Tint>) {
+        self.state().tree.borrow_mut().set_tint(id.index, tint);
         self.state().invalidate(self.hwnd());
     }
 

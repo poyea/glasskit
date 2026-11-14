@@ -4,7 +4,7 @@
 //! The widgets of a window as a tree, and its layout: measure, then arrange. It has no
 //! window code. Text sizes come from a [`Measure`], so tests can use simple numbers.
 
-use super::{Align, Insets, Length, SideMode, TextStyle};
+use super::{Align, Insets, Length, SideMode, TextStyle, Tint};
 use crate::edit::Editor;
 
 /// The inner space of a button around its label, in DIPs.
@@ -109,6 +109,7 @@ pub(crate) enum Content {
     Card {
         text: Option<(String, String)>,
         pinned: bool,
+        tint: Option<Tint>,
     },
     /// A column that scrolls up and down when its children are higher than it.
     Scroll {
@@ -130,6 +131,7 @@ impl Content {
         Content::Card {
             text: None,
             pinned: false,
+            tint: None,
         }
     }
 
@@ -326,6 +328,12 @@ impl Tree {
         if let Some(Content::Card { pinned, .. }) = self.nodes.get_mut(card).map(|n| &mut n.content)
         {
             *pinned = to;
+        }
+    }
+
+    pub fn set_tint(&mut self, card: usize, to: Option<Tint>) {
+        if let Some(Content::Card { tint, .. }) = self.nodes.get_mut(card).map(|n| &mut n.content) {
+            *tint = to;
         }
     }
 
@@ -1200,6 +1208,7 @@ mod tests {
             Content::Card {
                 text: Some((title.into(), body.into())),
                 pinned: false,
+                tint: None,
             },
             Axis::Stack,
             Align::Stretch,

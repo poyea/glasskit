@@ -262,14 +262,33 @@ fn widget(
                 focus_ring(dc, theme, r)?;
             }
         }
-        Content::Card { pinned, .. } => {
+        Content::Card { pinned, tint, .. } => {
             let hover = node.clickable && now.hover == Some(index);
-            let fill = match (hover, now.pressed == Some(index)) {
-                (true, true) => theme.button_pressed,
-                (true, false) => theme.button_hover,
-                (false, _) => theme.card,
+            let pressed = hover && now.pressed == Some(index);
+            let (fill, border) = match tint.filter(|_| !theme.high_contrast) {
+                Some(tint) => {
+                    let (red, green, blue) = tint.rgb();
+                    let base = if theme.dark { 0.28 } else { 0.2 };
+                    let more = match (hover, pressed) {
+                        (_, true) => 0.16,
+                        (true, false) => 0.08,
+                        (false, false) => 0.0,
+                    };
+                    (
+                        rgba(red, green, blue, base + more),
+                        rgba(red, green, blue, 0.6),
+                    )
+                }
+                None => {
+                    let fill = match (hover, pressed) {
+                        (_, true) => theme.button_pressed,
+                        (true, false) => theme.button_hover,
+                        (false, false) => theme.card,
+                    };
+                    (fill, theme.card_border)
+                }
             };
-            panel(dc, r, CARD_RADIUS, fill, theme.card_border)?;
+            panel(dc, r, CARD_RADIUS, fill, border)?;
             if *pinned {
                 let corner = Rect::new(r.x + r.w - PIN_CORNER, r.y, PIN_CORNER, PIN_CORNER);
                 draw_text(
