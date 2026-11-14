@@ -69,6 +69,7 @@ pub(super) struct Painter {
     pub(super) target: ID2D1DCRenderTarget,
     pub(super) centered: IDWriteTextFormat,
     pub(super) leading: IDWriteTextFormat,
+    pub(super) icons: IDWriteTextFormat,
     pub(super) _factory: ID2D1Factory,
 }
 
@@ -113,8 +114,20 @@ impl Painter {
                 )?;
                 Ok(format)
             };
+            let icons = dwrite.CreateTextFormat(
+                icon_font(&dwrite),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                ICON_SIZE * scale,
+                w!(""),
+            )?;
+            icons.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            icons.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
             Ok(Self {
                 target,
+                icons,
                 centered: format(DWRITE_TEXT_ALIGNMENT_CENTER)?,
                 leading: format(DWRITE_TEXT_ALIGNMENT_LEADING)?,
                 _factory: factory,
@@ -131,6 +144,25 @@ impl Painter {
             draw(&self.target);
             let _ = self.target.EndDraw(None, None);
         }
+    }
+}
+
+/// The icon font of Windows. Windows 10 does not have Segoe Fluent Icons, and has the same
+/// icons in Segoe MDL2 Assets.
+fn icon_font(dwrite: &IDWriteFactory) -> PCWSTR {
+    let fluent = w!("Segoe Fluent Icons");
+    let mut fonts = None;
+    let (mut index, mut found) = (0u32, windows::core::BOOL(0));
+    unsafe {
+        let _ = dwrite.GetSystemFontCollection(&mut fonts, false);
+        if let Some(fonts) = &fonts {
+            let _ = fonts.FindFamilyName(fluent, &mut index, &mut found);
+        }
+    }
+    if found.as_bool() {
+        fluent
+    } else {
+        w!("Segoe MDL2 Assets")
     }
 }
 
@@ -445,6 +477,7 @@ pub(super) fn paint_control(shared: &Shared, item: &DRAWITEMSTRUCT) {
     let kind = shared.kinds.borrow()[index];
     let (surface, _) = look.surface(shared.surfaces.borrow()[index]);
     let checked = shared.checked.borrow()[index];
+    let glyph = shared.glyphs.borrow()[index].clone();
     let state = item.itemState;
     let pressed = state.0 & ODS_SELECTED.0 != 0;
     let disabled = state.0 & ODS_DISABLED.0 != 0;
@@ -550,9 +583,13 @@ pub(super) fn paint_control(shared: &Shared, item: &DRAWITEMSTRUCT) {
                     right: w,
                     bottom: h,
                 };
+                let (label, format) = match &glyph {
+                    Some(glyph) => (glyph, &painter.icons),
+                    None => (&label, &painter.centered),
+                };
                 t.DrawText(
-                    &label,
-                    &painter.centered,
+                    label,
+                    format,
                     &area,
                     &text,
                     D2D1_DRAW_TEXT_OPTIONS_CLIP,

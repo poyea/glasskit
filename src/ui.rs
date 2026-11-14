@@ -15,7 +15,7 @@ use windows::Win32::System::WinRT::{
     RO_INIT_SINGLETHREADED, RoInitialize,
 };
 use windows::Win32::UI::Controls::{
-    ICC_STANDARD_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
+    ICC_STANDARD_CLASSES, ICC_WIN95_CLASSES, INITCOMMONCONTROLSEX, InitCommonControlsEx,
 };
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -87,7 +87,7 @@ impl Ui {
             let _ = RoInitialize(RO_INIT_SINGLETHREADED);
             let _ = InitCommonControlsEx(&INITCOMMONCONTROLSEX {
                 dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
-                dwICC: ICC_STANDARD_CLASSES,
+                dwICC: ICC_STANDARD_CLASSES | ICC_WIN95_CLASSES,
             });
             let hinstance: HINSTANCE = GetModuleHandleW(None).call("GetModuleHandleW")?.into();
             let dispatcher = CreateDispatcherQueueController(DispatcherQueueOptions {

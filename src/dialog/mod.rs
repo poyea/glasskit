@@ -36,9 +36,14 @@ use windows::Win32::Graphics::Gdi::{
     HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect, OUT_DEFAULT_PRECIS, PAINTSTRUCT, ReleaseDC,
     SelectObject, SetBkColor, SetTextColor,
 };
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
 use windows::Win32::UI::Controls::{
     DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_COMBOBOXEDIT, ODS_DISABLED, ODS_FOCUS, ODS_NOFOCUSRECT,
-    ODS_SELECTED, ODT_BUTTON, ODT_COMBOBOX, ODT_LISTBOX, SetWindowTheme, WM_MOUSELEAVE,
+    ODS_SELECTED, ODT_BUTTON, ODT_COMBOBOX, ODT_LISTBOX, SetWindowTheme, TOOLTIPS_CLASSW,
+    TTF_IDISHWND, TTF_SUBCLASS, TTM_ADDTOOLW, TTS_ALWAYSTIP, TTS_NOPREFIX, TTTOOLINFOW,
+    WM_MOUSELEAVE,
 };
 use windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -63,7 +68,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_APPWINDOW, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_OVERLAPPED, WS_SYSMENU,
     WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
 };
-use windows::core::{HSTRING, PCWSTR, w};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GWL_EXSTYLE, GWLP_HWNDPARENT, GetWindowLongPtrW, GetWindowRect, ICON_BIG, ICON_SMALL, IDYES,
+    MB_YESNO, SetForegroundWindow, SetWindowLongPtrW, WM_GETICON, WM_SETICON, WS_EX_TOPMOST,
+    WS_POPUP,
+};
+use windows::core::{HSTRING, PCWSTR, PWSTR, w};
 use windows_numerics::Vector2;
 
 use crate::Ui;
@@ -71,7 +81,9 @@ use crate::events::DialogId;
 use crate::native::{self, NativeWindow, state_of};
 use crate::placement::{Area, Placement, SCREEN_MARGIN};
 use crate::theme::{Theme, colorref, over, rgba};
+use crate::tray::{Icon, IconHandle};
 use crate::ui::Notice;
+use crate::window::Window;
 
 mod paint;
 mod picker;
@@ -103,6 +115,8 @@ const EN_CHANGE: u32 = 0x300;
 const DROP_DOWN_LIST_HEIGHT: i32 = 200;
 
 const FONT_SIZE: f32 = 14.0;
+
+const ICON_SIZE: f32 = 16.0;
 
 const BUTTON_RADIUS: f32 = 6.0;
 
@@ -174,6 +188,11 @@ enum Control<'a> {
     List,
     Check(&'a str),
     Button(&'a str),
+    /// A button that shows a character of the icon font. Its name shows as a tip.
+    IconButton {
+        icon: &'a str,
+        name: &'a str,
+    },
     /// A picker for where a window shows on the primary monitor: a small copy of the work area
     /// with the window in it. The user drags the window, clicks a place, or uses the arrow keys.
     /// `window_width` and `window_height` are the window size at 100% display scale.
@@ -208,6 +227,8 @@ struct Shared {
     kinds: RefCell<Vec<Kind>>,
     surfaces: RefCell<Vec<Surface>>,
     checked: RefCell<Vec<bool>>,
+    /// For each control: the character that an icon button shows.
+    glyphs: RefCell<Vec<Option<Vec<u16>>>>,
     /// The cards in client pixels.
     cards: RefCell<Vec<RECT>>,
     /// For each control: the field that the dialog paints around it, in client pixels.
@@ -248,6 +269,11 @@ pub struct Dialog {
     shown: bool,
     /// Declared before the fonts, so the window is gone before its fonts.
     window: NativeWindow<Shared>,
+    icon: Option<IconHandle>,
+    /// The window that the dialog belongs to.
+    owner: Option<HWND>,
+    /// The window that shows the tips of the icon buttons.
+    tips: Option<HWND>,
     font: Font,
     heading_font: Font,
     scale: f32,
@@ -326,6 +352,7 @@ impl Dialog {
                     kinds: RefCell::new(Vec::new()),
                     surfaces: RefCell::new(Vec::new()),
                     checked: RefCell::new(Vec::new()),
+                    glyphs: RefCell::new(Vec::new()),
                     cards: RefCell::new(Vec::new()),
                     fields: RefCell::new(Vec::new()),
                     placements: RefCell::new(Vec::new()),
@@ -358,6 +385,9 @@ impl Dialog {
                 id: DialogId(id),
                 shown: false,
                 window,
+                icon: None,
+                owner: None,
+                tips: None,
                 font: Font(ui_font(scale, FW_NORMAL.0 as i32)),
                 heading_font: Font(ui_font(scale, FW_SEMIBOLD.0 as i32)),
                 scale,
@@ -453,6 +483,13 @@ impl Dialog {
                 owner_drawn,
                 WINDOW_EX_STYLE(0),
             ),
+            Control::IconButton { name, .. } => (
+                w!("BUTTON"),
+                name,
+                Kind::Button,
+                owner_drawn,
+                WINDOW_EX_STYLE(0),
+            ),
             Control::Placement { .. } => (
                 PLACEMENT_CLASS,
                 "",
@@ -510,6 +547,10 @@ impl Dialog {
             shared.kinds.borrow_mut().push(kind);
             shared.surfaces.borrow_mut().push(surface);
             shared.checked.borrow_mut().push(false);
+            shared.glyphs.borrow_mut().push(match control {
+                Control::IconButton { icon, .. } => Some(icon.encode_utf16().collect()),
+                _ => None,
+            });
             shared.placements.borrow_mut().push(Placement::default());
             shared.window_sizes.borrow_mut().push(match control {
                 Control::Placement {
@@ -546,6 +587,7 @@ impl Dialog {
                 shared.kinds.borrow_mut().pop();
                 shared.surfaces.borrow_mut().pop();
                 shared.checked.borrow_mut().pop();
+                shared.glyphs.borrow_mut().pop();
                 shared.fields.borrow_mut().pop();
                 shared.placements.borrow_mut().pop();
                 shared.window_sizes.borrow_mut().pop();
@@ -574,7 +616,118 @@ impl Dialog {
             }
         }
         self.controls.push(hwnd);
+        if let Control::IconButton { name, .. } = control {
+            self.add_tip(hwnd, name);
+        }
         Ok(index)
+    }
+
+    /// Show `text` when the pointer stays on a control. A failure gives no tip.
+    fn add_tip(&mut self, control: HWND, text: &str) {
+        let dialog = self.window.hwnd();
+        unsafe {
+            let tips = match self.tips {
+                Some(tips) => tips,
+                None => {
+                    let Ok(tips) = CreateWindowExW(
+                        WS_EX_TOPMOST,
+                        TOOLTIPS_CLASSW,
+                        PCWSTR::null(),
+                        WS_POPUP | WINDOW_STYLE(TTS_ALWAYSTIP | TTS_NOPREFIX),
+                        CW_USEDEFAULT,
+                        CW_USEDEFAULT,
+                        CW_USEDEFAULT,
+                        CW_USEDEFAULT,
+                        Some(dialog),
+                        None,
+                        Some(self.ui.hinstance()),
+                        None,
+                    ) else {
+                        return;
+                    };
+                    if self.shared().look.theme.dark {
+                        let _ = SetWindowTheme(tips, w!("DarkMode_Explorer"), PCWSTR::null());
+                    }
+                    self.tips = Some(tips);
+                    tips
+                }
+            };
+            let mut wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+            // The size without the last field is right for all versions of the controls.
+            let tool = TTTOOLINFOW {
+                cbSize: (size_of::<TTTOOLINFOW>() - size_of::<*mut c_void>()) as u32,
+                uFlags: TTF_IDISHWND | TTF_SUBCLASS,
+                hwnd: dialog,
+                uId: control.0 as usize,
+                lpszText: PWSTR(wide.as_mut_ptr()),
+                ..Default::default()
+            };
+            SendMessageW(
+                tips,
+                TTM_ADDTOOLW,
+                None,
+                Some(LPARAM(&tool as *const TTTOOLINFOW as isize)),
+            );
+        }
+    }
+
+    /// Make the dialog belong to a window. The dialog then stays above the window, shows
+    /// in its middle, has its icon, and has no button of its own on the taskbar. While
+    /// [`Dialog::run`] runs, the window takes no input. Call it before the dialog shows.
+    pub fn set_owner(&mut self, window: &Window) {
+        let (hwnd, owner) = (self.window.hwnd(), window.hwnd());
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, owner.0 as isize);
+            let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex_style & !(WS_EX_APPWINDOW.0 as isize));
+            if self.icon.is_none() {
+                for kind in [ICON_SMALL, ICON_BIG] {
+                    let icon = SendMessageW(owner, WM_GETICON, Some(WPARAM(kind as usize)), None);
+                    SendMessageW(
+                        hwnd,
+                        WM_SETICON,
+                        Some(WPARAM(kind as usize)),
+                        Some(LPARAM(icon.0)),
+                    );
+                }
+            }
+            let (mut over, mut own) = (RECT::default(), RECT::default());
+            let mut info = MONITORINFO {
+                cbSize: size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let monitor = MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
+            if GetWindowRect(owner, &mut over).is_ok()
+                && GetWindowRect(hwnd, &mut own).is_ok()
+                && GetMonitorInfoW(monitor, &mut info).as_bool()
+            {
+                let (w, h) = (own.right - own.left, own.bottom - own.top);
+                let work = info.rcWork;
+                let x = (over.left + over.right - w) / 2;
+                let y = (over.top + over.bottom - h) / 2;
+                let x = x.min(work.right - w).max(work.left);
+                let y = y.min(work.bottom - h).max(work.top);
+                let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+            }
+        }
+        self.owner = Some(owner);
+    }
+
+    /// Show this picture in the title bar, the taskbar, and Alt+Tab.
+    pub fn set_icon(&mut self, icon: &Icon) -> Result<()> {
+        let handle = IconHandle::new(icon)?;
+        unsafe {
+            for kind in [ICON_SMALL, ICON_BIG] {
+                SendMessageW(
+                    self.window.hwnd(),
+                    WM_SETICON,
+                    Some(WPARAM(kind as usize)),
+                    Some(LPARAM(handle.0.0 as isize)),
+                );
+            }
+        }
+        self.icon = Some(handle);
+        Ok(())
     }
 
     /// Add a text that the user cannot change.
@@ -618,6 +771,19 @@ impl Dialog {
     /// Add a push button. A click gives [`Event::Clicked`].
     pub fn add_button(&mut self, text: &str, bounds: Bounds) -> Result<Id<kind::Button>> {
         self.add(Control::Button(text), bounds).map(Id::new)
+    }
+
+    /// Add a push button that shows an icon: a character of the icon font of Windows, Segoe
+    /// Fluent Icons, such as `"\u{E74D}"` for a bin. `name` tells what the button does: it
+    /// shows as a tip when the pointer stays on the button.
+    pub fn add_icon_button(
+        &mut self,
+        icon: &str,
+        name: &str,
+        bounds: Bounds,
+    ) -> Result<Id<kind::Button>> {
+        self.add(Control::IconButton { icon, name }, bounds)
+            .map(Id::new)
     }
 
     /// Add a picker for where a window shows on the primary monitor: a small copy of the
@@ -783,6 +949,19 @@ impl Dialog {
         }
     }
 
+    /// Ask a question that the user must answer with Yes or No before the dialog continues.
+    /// It gives true for Yes.
+    pub fn confirm(&self, title: &str, message: &str) -> bool {
+        unsafe {
+            MessageBoxW(
+                Some(self.window.hwnd()),
+                &HSTRING::from(message),
+                &HSTRING::from(title),
+                MB_YESNO | MB_ICONWARNING,
+            ) == IDYES
+        }
+    }
+
     /// The id that [`Event::Dialog`](crate::events::Event::Dialog) gives when this dialog has
     /// events.
     pub fn id(&self) -> DialogId {
@@ -815,7 +994,11 @@ impl Dialog {
     /// Show the dialog and give each event to `handler` until it returns [`Flow::Close`], with a
     /// message loop of its own. It is for an app without an
     /// [`EventLoop`](crate::events::EventLoop); with one, use [`Dialog::show`].
+    ///
+    /// A dialog with an [owner](Dialog::set_owner) is modal: the owner takes no input until
+    /// this call returns.
     pub fn run(&mut self, mut handler: impl FnMut(&mut Dialog, Event) -> Flow) -> Result<Outcome> {
+        let _modal = Modal::new(self.owner);
         self.show();
         loop {
             while let Some(event) = self.next_event() {
@@ -825,6 +1008,27 @@ impl Dialog {
             }
             if !self.ui.pump_wait()? {
                 return Ok(Outcome::Quit);
+            }
+        }
+    }
+}
+
+/// Takes the input away from the owner of a dialog, and gives it back when dropped.
+struct Modal(Option<HWND>);
+
+impl Modal {
+    fn new(owner: Option<HWND>) -> Self {
+        // An owner that was off before stays off after.
+        Self(owner.filter(|&owner| unsafe { !EnableWindow(owner, false).as_bool() }))
+    }
+}
+
+impl Drop for Modal {
+    fn drop(&mut self) {
+        if let Some(owner) = self.0 {
+            unsafe {
+                let _ = EnableWindow(owner, true);
+                let _ = SetForegroundWindow(owner);
             }
         }
     }
