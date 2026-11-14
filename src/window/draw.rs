@@ -13,7 +13,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_WORD_WRAPPING_NO_WRAP,
     IDWriteFactory, IDWriteTextFormat,
 };
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use super::text_box;
 use crate::error::{Call, Result};
@@ -38,6 +38,7 @@ const ICON_SIZE: f32 = 16.0;
 /// The pin of a pinned card, in the icon font, and the size of its corner, in DIPs.
 const PIN_ICON: &str = "\u{E718}";
 const PIN_CORNER: f32 = 30.0;
+const DROP_OUTLINE_WIDTH: f32 = 1.5;
 /// The three lines of the button of a side bar, in the icon font.
 const SIDE_TOGGLE_ICON: &str = "\u{E700}";
 
@@ -116,6 +117,18 @@ pub(super) struct Interaction {
     pub active: bool,
     /// The caret is in the off half of a blink.
     pub caret_off: bool,
+    pub drag: Option<Dragging>,
+}
+
+/// A widget that the pointer drags now.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Dragging {
+    pub item: usize,
+    /// How far the pointer moved the widget, in DIPs.
+    pub offset: (f32, f32),
+    /// The container that takes the widget, and a line at the place in it.
+    pub target: Option<usize>,
+    pub line: Option<Rect>,
 }
 
 pub(super) fn paint(
@@ -129,6 +142,9 @@ pub(super) fn paint(
         dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     }
     for index in tree.draw_order() {
+        if now.drag.is_some_and(|d| tree.within(index, d.item)) {
+            continue;
+        }
         let clip = tree.clip(index);
         if clip.is_some_and(|c| c.intersect(tree.nodes[index].rect).is_empty()) {
             continue;
@@ -147,7 +163,56 @@ pub(super) fn paint(
             scroll_bar(dc, theme, tree.nodes[index].rect, offset, extent)?;
         }
     }
+    if let Some(drag) = now.drag {
+        dragged(dc, tree, theme, formats, now, drag)?;
+    }
     Ok(())
+}
+
+/// The place where a drop goes, and the dragged widget at the pointer, above all others.
+fn dragged(
+    dc: &ID2D1DeviceContext,
+    tree: &Tree,
+    theme: &Theme,
+    formats: &Formats,
+    now: Interaction,
+    drag: Dragging,
+) -> windows::core::Result<()> {
+    if let Some(target) = drag.target {
+        let r = tree.nodes[target].rect;
+        let clip = tree.clip(target).map_or(r, |c| c.intersect(r));
+        unsafe {
+            dc.PushAxisAlignedClip(&d2d(clip), D2D1_ANTIALIAS_MODE_ALIASED);
+            let half = DROP_OUTLINE_WIDTH / 2.0;
+            dc.DrawRoundedRectangle(
+                &render::rounded(d2d(r), half, CARD_RADIUS),
+                &dc.CreateSolidColorBrush(&theme.accent, None)?,
+                DROP_OUTLINE_WIDTH,
+                None,
+            );
+        }
+        let line = drag.line.map_or(Ok(()), |line| {
+            panel(dc, line, 1.0, theme.accent, theme.accent)
+        });
+        unsafe { dc.PopAxisAlignedClip() };
+        line?;
+    }
+    let (dx, dy) = drag.offset;
+    let mut base = Matrix3x2::default();
+    unsafe { dc.GetTransform(&mut base) };
+    let moved = Matrix3x2 {
+        M31: dx * base.M11 + dy * base.M21 + base.M31,
+        M32: dx * base.M12 + dy * base.M22 + base.M32,
+        ..base
+    };
+    unsafe { dc.SetTransform(&moved) };
+    let drawn = tree
+        .draw_order()
+        .into_iter()
+        .filter(|&index| tree.within(index, drag.item))
+        .try_for_each(|index| widget(dc, tree, index, theme, formats, now));
+    unsafe { dc.SetTransform(&base) };
+    drawn
 }
 
 /// The bar of a scroll whose children are higher than it.

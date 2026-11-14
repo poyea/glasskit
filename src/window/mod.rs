@@ -70,8 +70,8 @@ use windows::Win32::UI::Input::Ime::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetDoubleClickTime, GetKeyState, ReleaseCapture, SetCapture, VIRTUAL_KEY, VK_BACK, VK_CONTROL,
-    VK_DELETE, VK_DOWN, VK_END, VK_HOME, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE,
-    VK_TAB, VK_UP,
+    VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_MENU, VK_RETURN, VK_RIGHT,
+    VK_SHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, GetCaretBlinkTime, GetClientRect, GetCursorPos,
@@ -99,7 +99,7 @@ use crate::tray::{Icon, IconHandle};
 use crate::ui::Notice;
 use crate::widget::tree::{Content, Tree};
 use crate::widget::{AnyId, Element, HasText, Id, SideMode, kind};
-use draw::{Formats, Interaction};
+use draw::{Dragging, Formats, Interaction};
 use scene::{Backdrop, Scene};
 use text_box::Field;
 
@@ -112,6 +112,8 @@ const WM_DWMCOLORIZATIONCOLORCHANGED: u32 = 0x0320;
 const TIMER_BLINK: usize = 1;
 /// How far a scroll moves for one notch of the wheel, in DIPs: three lines of body text.
 const WHEEL_STEP: f32 = 60.0;
+/// How far the pointer moves with the button down before a drag starts, in DIPs.
+const DRAG_START: f32 = 4.0;
 /// The caret stops to blink after this time without input, as in Windows.
 const BLINK_FOR: Duration = Duration::from_secs(5);
 const STYLE: WINDOW_STYLE = WS_OVERLAPPEDWINDOW;
@@ -146,6 +148,18 @@ pub enum WindowEvent {
     /// The user changed the mode of a [`SideBar`](crate::widget::SideBar) with its button.
     /// [`Window::side_mode`] gives the new mode.
     SideModeChanged(AnyId),
+    /// The user dragged a [`Card`](crate::widget::Card) and dropped it on a container that
+    /// is a drop target. The window does not move the card: the app does, with
+    /// [`Window::set_children`].
+    Dropped {
+        /// The card.
+        item: AnyId,
+        /// The container.
+        target: AnyId,
+        /// The place of the drop among the children of the container, counted without the
+        /// card: 0 is before the first child.
+        index: usize,
+    },
     /// The user clicked the close button or pressed Alt+F4. The window stays until the app
     /// drops it.
     CloseRequested,
@@ -188,10 +202,22 @@ struct State {
     icon: RefCell<Option<IconHandle>>,
     /// The last press of the left button, to count double and triple clicks.
     clicks: Cell<Clicks>,
+    /// The widget that the pointer holds, to drag it.
+    grab: Cell<Option<Grab>>,
     /// When the caret started to blink.
     blink_since: Cell<Instant>,
     /// The theme and material that the background shows now.
     applied: Cell<Option<(Theme, Material)>>,
+}
+
+/// A press of the left button on a widget that the user can drag.
+#[derive(Debug, Clone, Copy)]
+struct Grab {
+    item: usize,
+    /// Where the press was, in DIPs.
+    start: (f32, f32),
+    /// The pointer moved far enough, so the widget follows it.
+    dragging: bool,
 }
 
 /// The last press of the left button.
@@ -275,6 +301,7 @@ impl Window {
             reveal_focus: Cell::new(false),
             icon: RefCell::new(None),
             clicks: Cell::new(Clicks::default()),
+            grab: Cell::new(None),
             blink_since: Cell::new(Instant::now()),
             applied: Cell::new(None),
         };
@@ -572,6 +599,58 @@ impl State {
         }
     }
 
+    /// Move the widget that the pointer holds. It gives false when the pointer drags
+    /// nothing.
+    fn drag_to(&self, hwnd: HWND, point: (f32, f32)) -> bool {
+        let Some(mut grab) = self.grab.get() else {
+            return false;
+        };
+        let offset = (point.0 - grab.start.0, point.1 - grab.start.1);
+        if !grab.dragging {
+            if offset.0.abs().max(offset.1.abs()) < DRAG_START {
+                return false;
+            }
+            grab.dragging = true;
+            self.grab.set(Some(grab));
+        }
+        let place = self.tree.borrow().drop_at(point.0, point.1, grab.item);
+        let place = place.filter(|p| p.changes);
+        self.set_interaction(hwnd, |now| {
+            now.hover = None;
+            now.pressed = None;
+            now.drag = Some(Dragging {
+                item: grab.item,
+                offset,
+                target: place.map(|p| p.target),
+                line: place.and_then(|p| p.line),
+            });
+        });
+        true
+    }
+
+    /// End a drag. With a point, the widget drops there.
+    fn end_drag(&self, hwnd: HWND, at: Option<(f32, f32)>) {
+        let Some(grab) = self.grab.take() else {
+            return;
+        };
+        self.set_interaction(hwnd, |now| now.drag = None);
+        let (true, Some((x, y))) = (grab.dragging, at) else {
+            return;
+        };
+        let place = self.tree.borrow().drop_at(x, y, grab.item);
+        if let Some(place) = place.filter(|p| p.changes) {
+            self.push(WindowEvent::Dropped {
+                item: AnyId(grab.item),
+                target: AnyId(place.target),
+                index: place.index,
+            });
+        }
+    }
+
+    fn is_dragging(&self) -> bool {
+        self.grab.get().is_some_and(|g| g.dragging)
+    }
+
     /// Take the focus, the hover, and the press away from widgets that do not show.
     fn forget_hidden(&self) {
         let mut now = self.now.get();
@@ -705,6 +784,13 @@ impl State {
 
     /// Handle a key. `repeat` is true for the messages that a held key sends again.
     fn key(&self, hwnd: HWND, key: u16, repeat: bool) -> bool {
+        if key == VK_ESCAPE.0 && self.is_dragging() {
+            self.end_drag(hwnd, None);
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            return true;
+        }
         let taken = self.widget_key(hwnd, key, repeat);
         if !taken {
             self.push_key(Key(key), repeat);
@@ -1194,6 +1280,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     state.tracking.set(native::track_leave(hwnd));
                 }
                 let point = state.point(lparam);
+                if state.drag_to(hwnd, point) {
+                    return LRESULT(0);
+                }
                 let hit = state.tree.borrow().hit(point.0, point.1);
                 state.set_interaction(hwnd, |now| now.hover = hit);
                 // A drag from a text box selects text. After a double click, the word stays.
@@ -1213,7 +1302,15 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let clicks = state.count_click(lparam);
                 let point = state.point(lparam);
                 let hit = state.tree.borrow().hit(point.0, point.1);
-                if hit.is_some() {
+                // A press on a button in a card does not drag the card.
+                let source = state.tree.borrow().drag_source_at(point.0, point.1);
+                let source = source.filter(|&s| hit.is_none_or(|h| h == s));
+                state.grab.set(source.map(|item| Grab {
+                    item,
+                    start: point,
+                    dragging: false,
+                }));
+                if hit.is_some() || source.is_some() {
                     SetCapture(hwnd);
                 }
                 state.set_interaction(hwnd, |now| {
@@ -1235,6 +1332,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
+                if state.is_dragging() {
+                    state.end_drag(hwnd, Some(state.point(lparam)));
+                    let _ = ReleaseCapture();
+                    return LRESULT(0);
+                }
+                state.grab.set(None);
                 let pressed = state.now.get().pressed;
                 let (x, y) = state.point(lparam);
                 let hit = state.tree.borrow().hit(x, y);
@@ -1249,6 +1352,7 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 LRESULT(0)
             }
             WM_CAPTURECHANGED => {
+                state.end_drag(hwnd, None);
                 state.set_interaction(hwnd, |now| now.pressed = None);
                 LRESULT(0)
             }

@@ -269,6 +269,17 @@ macro_rules! container {
             self
         }
 
+        /// Let the user drop a dragged [`Card`] on this container. The drop gives
+        /// [`WindowEvent::Dropped`](crate::window::WindowEvent::Dropped) with this container
+        /// and the place among its children. The container does not take the card: the app
+        /// moves it with
+        /// [`Window::set_children`](crate::window::Window::set_children).
+        #[must_use]
+        pub fn drop_target(mut self) -> Self {
+            self.node.drop_target = true;
+            self
+        }
+
         fn container_mut(&mut self) -> &mut Container {
             self.node
                 .container
@@ -644,6 +655,8 @@ impl Default for Stack {
 /// Then the title, the body, and the children are one under the other. Read and change the
 /// text with [`Window::card_text`](crate::window::Window::card_text) and
 /// [`Window::set_card_text`](crate::window::Window::set_card_text).
+///
+/// A card can also be [`clickable`](Card::clickable) and [`draggable`](Card::draggable).
 #[derive(Debug)]
 pub struct Card {
     node: Node,
@@ -684,6 +697,16 @@ impl Card {
         self
     }
 
+    /// Show a pin in the top right corner. Change it with
+    /// [`Window::set_pinned`](crate::window::Window::set_pinned).
+    #[must_use]
+    pub fn pinned(mut self, pinned: bool) -> Self {
+        if let Content::Card { pinned: p, .. } = &mut self.node.content {
+            *p = pinned;
+        }
+        self
+    }
+
     /// Let the user click the card. A click, Space, or Enter on it gives
     /// [`WindowEvent::Clicked`](crate::window::WindowEvent::Clicked). A click on a button in
     /// the card goes to the button.
@@ -693,13 +716,11 @@ impl Card {
         self
     }
 
-    /// Show a pin in the top right corner. Change it with
-    /// [`Window::set_pinned`](crate::window::Window::set_pinned).
+    /// Let the user drag the card with the pointer to a container that is a
+    /// [`drop_target`](Card::drop_target). Esc stops the drag.
     #[must_use]
-    pub fn pinned(mut self, pinned: bool) -> Self {
-        if let Content::Card { pinned: p, .. } = &mut self.node.content {
-            *p = pinned;
-        }
+    pub fn draggable(mut self) -> Self {
+        self.node.draggable = true;
         self
     }
 

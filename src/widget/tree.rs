@@ -174,6 +174,20 @@ pub(crate) struct Node {
     pub rect: Rect,
     /// A click on the widget gives an event, and Tab moves to it.
     pub clickable: bool,
+    pub draggable: bool,
+    pub drop_target: bool,
+}
+
+/// Where a dragged widget goes if the user drops it now.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DropPlace {
+    pub target: usize,
+    /// The index among the children of the target, without the dragged widget.
+    pub index: usize,
+    /// False when the widget is at this place already.
+    pub changes: bool,
+    /// A line at the place, between two children of the target.
+    pub line: Option<Rect>,
 }
 
 impl Node {
@@ -188,6 +202,8 @@ impl Node {
             parent: None,
             rect: Rect::default(),
             clickable: false,
+            draggable: false,
+            drop_target: false,
         }
     }
 
@@ -369,6 +385,85 @@ impl Tree {
                 None => return false,
             }
         }
+    }
+
+    /// The widget that a drag from this point moves: the innermost one that the user can
+    /// drag.
+    pub fn drag_source_at(&self, x: f32, y: f32) -> Option<usize> {
+        let top = self
+            .draw_order()
+            .into_iter()
+            .rev()
+            .find(|&i| self.shows_at(i, x, y))?;
+        let mut at = Some(top);
+        while let Some(index) = at {
+            let n = &self.nodes[index];
+            if n.draggable && n.enabled {
+                return Some(index);
+            }
+            at = n.parent;
+        }
+        None
+    }
+
+    /// Where the dragged widget `item` goes, if the user drops it at this point.
+    pub fn drop_at(&self, x: f32, y: f32, item: usize) -> Option<DropPlace> {
+        let target = self.draw_order().into_iter().rev().find(|&i| {
+            self.nodes[i].drop_target && self.shows_at(i, x, y) && !self.within(i, item)
+        })?;
+        let node = &self.nodes[target];
+        let c = node.container.as_ref()?;
+        let own = &c.children[self.own_start(target).min(c.children.len())..];
+        let others: Vec<usize> = own.iter().copied().filter(|&ch| ch != item).collect();
+        let shown: Vec<usize> = others
+            .iter()
+            .copied()
+            .filter(|&ch| self.present(ch))
+            .collect();
+        let along = |r: Rect| match c.axis {
+            Axis::Row => (r.x, r.w),
+            Axis::Column | Axis::Stack => (r.y, r.h),
+        };
+        let pointer = if c.axis == Axis::Row { x } else { y };
+        let at = match c.axis {
+            Axis::Stack => shown.len(),
+            Axis::Row | Axis::Column => shown
+                .iter()
+                .position(|&ch| {
+                    let (start, length) = along(self.nodes[ch].rect);
+                    pointer < start + length / 2.0
+                })
+                .unwrap_or(shown.len()),
+        };
+        let index = shown.get(at).map_or(others.len(), |ch| {
+            others.iter().position(|o| o == ch).unwrap_or(others.len())
+        });
+        let changes = self.nodes[item].parent != Some(target)
+            || own.iter().position(|&ch| ch == item) != Some(index);
+
+        let inner = node.rect.inset(c.padding);
+        let before = at.checked_sub(1).and_then(|i| shown.get(i));
+        let edge = match (before, shown.get(at)) {
+            (Some(&before), _) => {
+                let (start, length) = along(self.nodes[before].rect);
+                start + length + c.gap / 2.0
+            }
+            (None, Some(&after)) => {
+                (along(self.nodes[after].rect).0 - c.gap / 2.0).max(along(inner).0)
+            }
+            (None, None) => along(inner).0,
+        };
+        let line = match c.axis {
+            Axis::Row => Some(Rect::new(edge - 1.0, inner.y, 2.0, inner.h)),
+            Axis::Column => Some(Rect::new(inner.x, edge - 1.0, inner.w, 2.0)),
+            Axis::Stack => None,
+        };
+        Some(DropPlace {
+            target,
+            index,
+            changes,
+            line: line.filter(|_| changes),
+        })
     }
 
     fn add_side_head(&mut self, title: String) -> usize {
@@ -1101,14 +1196,46 @@ mod tests {
     }
 
     fn card(title: &str, body: &str) -> Node {
-        Node::container(
+        let mut node = Node::container(
             Content::Card {
                 text: Some((title.into(), body.into())),
                 pinned: false,
             },
             Axis::Stack,
             Align::Stretch,
-        )
+        );
+        node.clickable = true;
+        node.draggable = true;
+        node
+    }
+
+    /// Two lanes of 100 DIPs side by side, each a column with a gap of 10 DIPs. The first
+    /// lane has two cards, and the second lane has one.
+    fn lanes() -> (Tree, [usize; 2], [usize; 3]) {
+        let mut t = Tree::default();
+        let cards = [
+            t.add(card("A", "")),
+            t.add(card("B", "")),
+            t.add(card("C", "")),
+        ];
+        let mut lanes = [0; 2];
+        for (lane, own) in [&cards[..2], &cards[2..]].into_iter().enumerate() {
+            let mut node = with(
+                Node::container(Content::Blank, Axis::Column, Align::Stretch),
+                own,
+            );
+            node.container.as_mut().unwrap().gap = 10.0;
+            node.width = Length::Fixed(100.0);
+            node.drop_target = true;
+            lanes[lane] = t.add(node);
+        }
+        let row = t.add(with(
+            Node::container(Content::Blank, Axis::Row, Align::Stretch),
+            &lanes,
+        ));
+        t.root = Some(row);
+        t.layout(200.0, 300.0, &Fixed);
+        (t, lanes, cards)
     }
 
     #[test]
@@ -1130,51 +1257,54 @@ mod tests {
         t.layout(200.0, 200.0, &Fixed);
         assert_eq!(t.card_text(c), Some(("Plan B".into(), String::new())));
         assert_eq!(t.nodes[extra].rect.y, 24.0);
+        assert_eq!(t.focus_order(), [c, extra]);
+        assert_eq!(t.hit(5.0, 5.0), Some(c));
+        assert_eq!(t.hit(5.0, 30.0), Some(extra));
     }
 
     #[test]
-    fn a_click_on_a_card_goes_to_the_card_or_to_its_button() {
-        let mut t = Tree::default();
-        let open = t.add(button("Open"));
-        let mut node = with(card("Plan", ""), &[open]);
-        node.clickable = true;
-        let c = t.add(node);
-        t.root = Some(c);
-        t.layout(200.0, 200.0, &Fixed);
-        assert_eq!(t.focus_order(), [c, open]);
-        assert_eq!(t.hit(5.0, 5.0), Some(c));
-        assert_eq!(t.hit(5.0, 30.0), Some(open));
+    fn a_drag_starts_on_a_card_and_drops_between_cards() {
+        let (t, lanes, cards) = lanes();
+        // Each card is 20 DIPs high: A at 0, B at 30.
+        assert_eq!(t.drag_source_at(50.0, 35.0), Some(cards[1]));
+        assert_eq!(t.drag_source_at(50.0, 100.0), None);
+
+        let place = t.drop_at(150.0, 5.0, cards[0]).unwrap();
+        assert_eq!(
+            (place.target, place.index, place.changes),
+            (lanes[1], 0, true)
+        );
+        assert_eq!(place.line, Some(Rect::new(100.0, -1.0, 100.0, 2.0)));
+        let place = t.drop_at(150.0, 200.0, cards[0]).unwrap();
+        assert_eq!((place.index, place.changes), (1, true));
+        assert_eq!(place.line, Some(Rect::new(100.0, 24.0, 100.0, 2.0)));
+
+        // In its own lane, A can go after B, and a drop at its own place changes nothing.
+        let place = t.drop_at(50.0, 200.0, cards[0]).unwrap();
+        assert_eq!(
+            (place.target, place.index, place.changes),
+            (lanes[0], 1, true)
+        );
+        let place = t.drop_at(50.0, 5.0, cards[0]).unwrap();
+        assert_eq!((place.index, place.changes, place.line), (0, false, None));
+        assert_eq!(t.drop_at(250.0, 5.0, cards[0]), None);
     }
 
     #[test]
     fn new_children_replace_the_old_ones() {
-        let mut t = Tree::default();
-        let [a, b, c] = ["A", "B", "C"].map(|label| t.add(button(label)));
-        let column = |children: &[usize]| {
-            with(
-                Node::container(Content::Blank, Axis::Column, Align::Stretch),
-                children,
-            )
-        };
-        let first = t.add(column(&[a, b]));
-        let second = t.add(column(&[c]));
-        let row = t.add(with(
-            Node::container(Content::Blank, Axis::Row, Align::Stretch),
-            &[first, second],
-        ));
-        t.root = Some(row);
-        t.set_children(second, &[a, c, a, second, row]);
-        assert_eq!(t.nodes[first].children(), [b]);
-        assert_eq!(t.nodes[second].children(), [a, c]);
-        t.set_children(second, &[]);
-        assert_eq!(t.nodes[c].parent, None);
-        assert!(!t.shown(c));
+        let (mut t, lanes, cards) = lanes();
+        t.set_children(lanes[1], &[cards[0], cards[2], cards[0], lanes[1]]);
+        assert_eq!(t.nodes[lanes[0]].children(), [cards[1]]);
+        assert_eq!(t.nodes[lanes[1]].children(), [cards[0], cards[2]]);
+        t.set_children(lanes[1], &[]);
+        assert_eq!(t.nodes[cards[2]].parent, None);
+        assert!(!t.shown(cards[2]));
 
         // The texts of a card stay when its children change.
-        let texted = t.add(card("Plan", "Write it"));
-        t.set_children(texted, &[c]);
-        assert_eq!(t.nodes[texted].children().len(), 3);
-        assert_eq!(t.nodes[texted].children()[2], c);
+        let extra = t.add(button("Open"));
+        t.set_children(cards[1], &[extra]);
+        assert_eq!(t.nodes[cards[1]].children().len(), 3);
+        assert_eq!(t.nodes[cards[1]].children()[2], extra);
     }
 
     #[test]
