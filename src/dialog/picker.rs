@@ -43,7 +43,7 @@ impl Picker {
         let k = (room_w / work_w).min(room_h / work_h);
         let (w, h) = (work_w * k, work_h * k);
         let left = ((client.right as f32 - w) / 2.0).floor();
-        let (window_w, window_h) = shared.window_sizes.borrow()[index];
+        let (window_w, window_h) = shared.controls.borrow()[index].window_size;
         Self {
             screen: Area {
                 left,
@@ -103,8 +103,8 @@ pub(super) fn paint_placement(shared: &Shared, index: usize, hwnd: HWND, hdc: HD
     let theme = &look.theme;
     let s = look.scale;
     let picker = Picker::new(shared, index, hwnd);
-    let window = picker.window(shared.placements.borrow()[index]);
-    let (surface, _) = look.surface(shared.surfaces.borrow()[index]);
+    let window = picker.window(shared.controls.borrow()[index].placement);
+    let (surface, _) = look.surface(shared.controls.borrow()[index].surface);
     let focused = unsafe { GetFocus() } == hwnd;
     let size: Vec<u16> = format!(
         "{} \u{d7} {}",
@@ -185,11 +185,11 @@ pub(super) fn paint_placement(shared: &Shared, index: usize, hwnd: HWND, hdc: HD
 /// Store a placement that the user made, repaint, and tell the app.
 pub(super) fn user_placement(shared: &Shared, index: usize, hwnd: HWND, placement: Placement) {
     {
-        let mut placements = shared.placements.borrow_mut();
-        if placements[index] == placement {
+        let mut controls = shared.controls.borrow_mut();
+        if controls[index].placement == placement {
             return;
         }
-        placements[index] = placement;
+        controls[index].placement = placement;
     }
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -235,7 +235,7 @@ pub(super) extern "system" fn placement_proc(
                 let _ = SetFocus(Some(hwnd));
                 SetCapture(hwnd);
                 let picker = Picker::new(shared, index, hwnd);
-                let window = picker.window(shared.placements.borrow()[index]);
+                let window = picker.window(shared.controls.borrow()[index].placement);
                 let (x, y) = point();
                 let inside =
                     x >= window.left && x < window.right && y >= window.top && y < window.bottom;
@@ -276,7 +276,7 @@ pub(super) extern "system" fn placement_proc(
                     VK_DOWN => (0.0, PICKER_KEY_STEP),
                     _ => return DefWindowProcW(hwnd, msg, wparam, lparam),
                 };
-                let p = shared.placements.borrow()[index];
+                let p = shared.controls.borrow()[index].placement;
                 let moved = Placement::new(snap(p.x() + dx), snap(p.y() + dy));
                 user_placement(shared, index, hwnd, moved);
                 LRESULT(0)

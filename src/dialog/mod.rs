@@ -78,10 +78,10 @@ use windows_numerics::Vector2;
 
 use crate::Ui;
 use crate::events::DialogId;
+use crate::icon::{Icon, IconHandle};
 use crate::native::{self, NativeWindow, state_of};
 use crate::placement::{Area, Placement, SCREEN_MARGIN};
 use crate::theme::{Theme, colorref, over, rgba};
-use crate::tray::{Icon, IconHandle};
 use crate::ui::Notice;
 use crate::window::Window;
 
@@ -220,23 +220,29 @@ enum Surface {
     Card,
 }
 
+/// What the dialog keeps for one control.
+struct ControlState {
+    kind: Kind,
+    /// What is behind the control: the window or a card.
+    surface: Surface,
+    checked: bool,
+    /// The character that an icon button shows.
+    glyph: Option<Vec<u16>>,
+    /// The field that the dialog paints around the control, in client pixels.
+    field: Option<RECT>,
+    /// The placement that a placement picker shows.
+    placement: Placement,
+    /// The window size that a placement picker shows, at 100% scale.
+    window_size: (i32, i32),
+}
+
 /// The window procedure only puts events in the queue. [`Dialog::run`] gives them to the handler
 /// outside the window procedure, so the handler can change the controls safely.
 struct Shared {
     id: u32,
-    kinds: RefCell<Vec<Kind>>,
-    surfaces: RefCell<Vec<Surface>>,
-    checked: RefCell<Vec<bool>>,
-    /// For each control: the character that an icon button shows.
-    glyphs: RefCell<Vec<Option<Vec<u16>>>>,
+    controls: RefCell<Vec<ControlState>>,
     /// The cards in client pixels.
     cards: RefCell<Vec<RECT>>,
-    /// For each control: the field that the dialog paints around it, in client pixels.
-    fields: RefCell<Vec<Option<RECT>>>,
-    /// For each control: the placement that a placement picker shows.
-    placements: RefCell<Vec<Placement>>,
-    /// For each control: the window size that a placement picker shows, at 100% scale.
-    window_sizes: RefCell<Vec<(i32, i32)>>,
     /// While the user drags in a placement picker: the grab point in the window, in pixels.
     grab: Cell<Option<(f32, f32)>>,
     hover: Cell<Option<usize>>,
@@ -255,7 +261,7 @@ impl Shared {
     fn index_of(&self, child: HWND) -> Option<usize> {
         let id = unsafe { GetDlgCtrlID(child) } as usize;
         let index = id.checked_sub(FIRST_ID)?;
-        (index < self.kinds.borrow().len()).then_some(index)
+        (index < self.controls.borrow().len()).then_some(index)
     }
 }
 
@@ -349,14 +355,8 @@ impl Dialog {
             let window = NativeWindow::attach(
                 hwnd,
                 Rc::new(Shared {
-                    kinds: RefCell::new(Vec::new()),
-                    surfaces: RefCell::new(Vec::new()),
-                    checked: RefCell::new(Vec::new()),
-                    glyphs: RefCell::new(Vec::new()),
+                    controls: RefCell::new(Vec::new()),
                     cards: RefCell::new(Vec::new()),
-                    fields: RefCell::new(Vec::new()),
-                    placements: RefCell::new(Vec::new()),
-                    window_sizes: RefCell::new(Vec::new()),
                     grab: Cell::new(None),
                     hover: Cell::new(None),
                     id,
@@ -542,28 +542,24 @@ impl Dialog {
         };
         let index = self.controls.len();
         let id = FIRST_ID + index;
-        {
-            let shared = self.shared();
-            shared.kinds.borrow_mut().push(kind);
-            shared.surfaces.borrow_mut().push(surface);
-            shared.checked.borrow_mut().push(false);
-            shared.glyphs.borrow_mut().push(match control {
+        self.shared().controls.borrow_mut().push(ControlState {
+            kind,
+            surface,
+            checked: false,
+            glyph: match control {
                 Control::IconButton { icon, .. } => Some(icon.encode_utf16().collect()),
                 _ => None,
-            });
-            shared.placements.borrow_mut().push(Placement::default());
-            shared.window_sizes.borrow_mut().push(match control {
+            },
+            field: matches!(kind, Kind::Edit | Kind::List).then_some(rect),
+            placement: Placement::default(),
+            window_size: match control {
                 Control::Placement {
                     window_width,
                     window_height,
                 } => (window_width, window_height),
                 _ => (0, 0),
-            });
-            shared
-                .fields
-                .borrow_mut()
-                .push(matches!(kind, Kind::Edit | Kind::List).then_some(rect));
-        }
+            },
+        });
         let hwnd = unsafe {
             CreateWindowExW(
                 ex_style,
@@ -583,14 +579,7 @@ impl Dialog {
         let hwnd = match hwnd {
             Ok(hwnd) => hwnd,
             Err(err) => {
-                let shared = self.shared();
-                shared.kinds.borrow_mut().pop();
-                shared.surfaces.borrow_mut().pop();
-                shared.checked.borrow_mut().pop();
-                shared.glyphs.borrow_mut().pop();
-                shared.fields.borrow_mut().pop();
-                shared.placements.borrow_mut().pop();
-                shared.window_sizes.borrow_mut().pop();
+                self.shared().controls.borrow_mut().pop();
                 return Err(err).call("CreateWindowExW(control)");
             }
         };
@@ -811,7 +800,7 @@ impl Dialog {
     }
 
     fn kind(&self, index: usize) -> Kind {
-        self.shared().kinds.borrow()[index]
+        self.shared().controls.borrow()[index].kind
     }
 
     fn send(&self, index: usize, msg: u32, wparam: usize, lparam: isize) -> isize {
@@ -899,12 +888,12 @@ impl Dialog {
 
     /// Whether a check box is checked.
     pub fn checked(&self, id: Id<kind::Check>) -> bool {
-        self.shared().checked.borrow()[id.index]
+        self.shared().controls.borrow()[id.index].checked
     }
 
     /// Check or clear a check box. It does not give [`Event::Clicked`].
     pub fn set_checked(&self, id: Id<kind::Check>, checked: bool) {
-        self.shared().checked.borrow_mut()[id.index] = checked;
+        self.shared().controls.borrow_mut()[id.index].checked = checked;
         unsafe {
             let _ = InvalidateRect(Some(self.control(id.index)), None, false);
         }
@@ -912,12 +901,12 @@ impl Dialog {
 
     /// The place that a placement picker shows.
     pub fn placement(&self, id: Id<kind::PlacementPicker>) -> Placement {
-        self.shared().placements.borrow()[id.index]
+        self.shared().controls.borrow()[id.index].placement
     }
 
     /// Change the place that a placement picker shows. It does not give [`Event::Changed`].
     pub fn set_placement(&self, id: Id<kind::PlacementPicker>, placement: Placement) {
-        self.shared().placements.borrow_mut()[id.index] = placement;
+        self.shared().controls.borrow_mut()[id.index].placement = placement;
         unsafe {
             let _ = InvalidateRect(Some(self.control(id.index)), None, false);
         }
@@ -1140,8 +1129,9 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             WM_LBUTTONDOWN => {
                 // A click on the padding of a field gives the focus to the control in it.
                 let (x, y) = native::point(lparam);
-                let hit = shared.fields.borrow().iter().position(|f| {
-                    f.is_some_and(|f| x >= f.left && x < f.right && y >= f.top && y < f.bottom)
+                let hit = shared.controls.borrow().iter().position(|c| {
+                    c.field
+                        .is_some_and(|f| x >= f.left && x < f.right && y >= f.top && y < f.bottom)
                 });
                 if let Some(index) = hit
                     && let Ok(child) = GetDlgItem(Some(hwnd), (FIRST_ID + index) as i32)
@@ -1155,11 +1145,11 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                 let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
                 if id >= FIRST_ID {
                     let index = id - FIRST_ID;
-                    let kind = shared.kinds.borrow().get(index).copied();
+                    let kind = shared.controls.borrow().get(index).map(|c| c.kind);
                     match (kind, code) {
                         (Some(Kind::Edit), EN_SETFOCUS | EN_KILLFOCUS)
                         | (Some(Kind::List), LBN_SETFOCUS | LBN_KILLFOCUS) => {
-                            let field = shared.fields.borrow().get(index).copied().flatten();
+                            let field = shared.controls.borrow().get(index).and_then(|c| c.field);
                             if let Some(field) = field {
                                 let _ = InvalidateRect(Some(hwnd), Some(&field), true);
                             }
@@ -1179,12 +1169,12 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
                     ID_CANCEL => Some(Event::Close),
                     _ if id >= FIRST_ID => {
                         let index = id - FIRST_ID;
-                        let kind = shared.kinds.borrow().get(index).copied();
+                        let kind = shared.controls.borrow().get(index).map(|c| c.kind);
                         let control = AnyId(index);
                         match (kind, code) {
                             (Some(Kind::Check), BN_CLICKED) => {
-                                if let Some(checked) = shared.checked.borrow_mut().get_mut(index) {
-                                    *checked = !*checked;
+                                if let Some(c) = shared.controls.borrow_mut().get_mut(index) {
+                                    c.checked = !c.checked;
                                 }
                                 let _ = InvalidateRect(
                                     Some(HWND(lparam.0 as *mut c_void)),

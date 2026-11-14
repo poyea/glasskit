@@ -96,23 +96,12 @@ impl Graphics {
     /// A centered format in the icon font of Windows. Windows 10 does not have Segoe Fluent
     /// Icons, and has the same icons in Segoe MDL2 Assets.
     pub fn icon_format(&self, size_px: f32) -> Result<IDWriteTextFormat> {
-        let fluent = w!("Segoe Fluent Icons");
-        let mut fonts = None;
-        let (mut index, mut found) = (0u32, BOOL(0));
-        unsafe {
-            self.dwrite
-                .GetSystemFontCollection(&mut fonts, false)
-                .call("GetSystemFontCollection")?;
-            if let Some(fonts) = &fonts {
-                let _ = fonts.FindFamilyName(fluent, &mut index, &mut found);
-            }
-        }
-        let family = if found.as_bool() {
-            fluent
-        } else {
-            w!("Segoe MDL2 Assets")
-        };
-        self.format(family, size_px, DWRITE_FONT_WEIGHT_NORMAL, true)
+        self.format(
+            icon_family(&self.dwrite),
+            size_px,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            true,
+        )
     }
 
     fn format(
@@ -199,6 +188,25 @@ pub fn layout_width(layout: &IDWriteTextLayout) -> Result<f32> {
     let mut metrics = DWRITE_TEXT_METRICS::default();
     unsafe { layout.GetMetrics(&mut metrics).call("GetMetrics")? };
     Ok(metrics.width)
+}
+
+/// The icon font of Windows. Windows 10 does not have Segoe Fluent Icons, and has the
+/// same icons in Segoe MDL2 Assets.
+pub(crate) fn icon_family(dwrite: &IDWriteFactory) -> PCWSTR {
+    let fluent = w!("Segoe Fluent Icons");
+    let mut fonts = None;
+    let (mut index, mut found) = (0u32, BOOL(0));
+    unsafe {
+        let _ = dwrite.GetSystemFontCollection(&mut fonts, false);
+        if let Some(fonts) = &fonts {
+            let _ = fonts.FindFamilyName(fluent, &mut index, &mut found);
+        }
+    }
+    if found.as_bool() {
+        fluent
+    } else {
+        w!("Segoe MDL2 Assets")
+    }
 }
 
 pub fn rect(left: f32, top: f32, width: f32, height: f32) -> D2D_RECT_F {

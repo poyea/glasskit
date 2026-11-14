@@ -115,7 +115,7 @@ impl Painter {
                 Ok(format)
             };
             let icons = dwrite.CreateTextFormat(
-                icon_font(&dwrite),
+                crate::render::icon_family(&dwrite),
                 None,
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
@@ -144,25 +144,6 @@ impl Painter {
             draw(&self.target);
             let _ = self.target.EndDraw(None, None);
         }
-    }
-}
-
-/// The icon font of Windows. Windows 10 does not have Segoe Fluent Icons, and has the same
-/// icons in Segoe MDL2 Assets.
-fn icon_font(dwrite: &IDWriteFactory) -> PCWSTR {
-    let fluent = w!("Segoe Fluent Icons");
-    let mut fonts = None;
-    let (mut index, mut found) = (0u32, windows::core::BOOL(0));
-    unsafe {
-        let _ = dwrite.GetSystemFontCollection(&mut fonts, false);
-        if let Some(fonts) = &fonts {
-            let _ = fonts.FindFamilyName(fluent, &mut index, &mut found);
-        }
-    }
-    if found.as_bool() {
-        fluent
-    } else {
-        w!("Segoe MDL2 Assets")
     }
 }
 
@@ -196,7 +177,11 @@ pub(super) extern "system" fn themed_control(
 ) -> LRESULT {
     unsafe {
         let shared = &*(data as *const Shared);
-        let drop_down = shared.kinds.borrow().get(index) == Some(&Kind::DropDown);
+        let drop_down = shared
+            .controls
+            .borrow()
+            .get(index)
+            .is_some_and(|c| c.kind == Kind::DropDown);
         match msg {
             WM_MOUSEMOVE if shared.hover.get() != Some(index) => {
                 shared.hover.set(Some(index));
@@ -275,7 +260,7 @@ pub(super) fn paint_background(shared: &Shared, hwnd: HWND, hdc: HDC) {
         };
         let focused = shared.index_of(GetFocus());
         let cards = shared.cards.borrow();
-        let fields = shared.fields.borrow();
+        let controls = shared.controls.borrow();
         painter.paint(hdc, &client, |t| {
             t.Clear(Some(&look.window));
             let theme = &look.theme;
@@ -302,8 +287,8 @@ pub(super) fn paint_background(shared: &Shared, hwnd: HWND, hdc: HDC) {
                 t.FillRoundedRectangle(&card_shape, &card);
                 t.DrawRoundedRectangle(&card_shape, &border, 1.0, None);
             }
-            for (i, f) in fields.iter().enumerate() {
-                let Some(f) = f else {
+            for (i, c) in controls.iter().enumerate() {
+                let Some(f) = &c.field else {
                     continue;
                 };
                 let field_shape = shape(f, FIELD_RADIUS);
@@ -325,7 +310,7 @@ pub(super) fn paint_drop_down(shared: &Shared, index: usize, hwnd: HWND, hdc: HD
         return;
     };
     let theme = &look.theme;
-    let (surface, _) = look.surface(shared.surfaces.borrow()[index]);
+    let (surface, _) = look.surface(shared.controls.borrow()[index].surface);
     unsafe {
         let mut client = RECT::default();
         let _ = GetClientRect(hwnd, &mut client);
@@ -474,10 +459,10 @@ pub(super) fn paint_control(shared: &Shared, item: &DRAWITEMSTRUCT) {
     let Some(index) = shared.index_of(item.hwndItem) else {
         return;
     };
-    let kind = shared.kinds.borrow()[index];
-    let (surface, _) = look.surface(shared.surfaces.borrow()[index]);
-    let checked = shared.checked.borrow()[index];
-    let glyph = shared.glyphs.borrow()[index].clone();
+    let kind = shared.controls.borrow()[index].kind;
+    let (surface, _) = look.surface(shared.controls.borrow()[index].surface);
+    let checked = shared.controls.borrow()[index].checked;
+    let glyph = shared.controls.borrow()[index].glyph.clone();
     let state = item.itemState;
     let pressed = state.0 & ODS_SELECTED.0 != 0;
     let disabled = state.0 & ODS_DISABLED.0 != 0;
@@ -604,13 +589,13 @@ pub(super) fn paint_control(shared: &Shared, item: &DRAWITEMSTRUCT) {
 pub(super) fn control_colors(shared: &Shared, msg: u32, hdc: HDC, child: HWND) -> LRESULT {
     let look = &shared.look;
     let index = shared.index_of(child);
-    let kind = index.map(|i| shared.kinds.borrow()[i]);
+    let kind = index.map(|i| shared.controls.borrow()[i].kind);
     let (back, brush, text) = match (msg, kind) {
         (WM_CTLCOLORSTATIC, Some(Kind::Edit)) => {
             (look.field, look.field_brush, look.dim_text(look.field))
         }
         (WM_CTLCOLORSTATIC, _) => {
-            let surface = index.map_or(Surface::Window, |i| shared.surfaces.borrow()[i]);
+            let surface = index.map_or(Surface::Window, |i| shared.controls.borrow()[i].surface);
             let (back, brush) = look.surface(surface);
             (back, brush, look.text())
         }
