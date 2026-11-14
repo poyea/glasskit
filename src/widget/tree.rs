@@ -310,6 +310,64 @@ impl Tree {
         }
     }
 
+    /// The number of children at the start of a container that are parts of the container
+    /// itself: the head of a side bar, and the texts of a card.
+    fn own_start(&self, index: usize) -> usize {
+        match &self.nodes[index].content {
+            Content::SideBar { .. } => 1,
+            Content::Card { text: Some(_), .. } => 2,
+            _ => 0,
+        }
+    }
+
+    /// Give a container these children, in this order, in place of the ones that it has.
+    /// They move out of the containers that held them before.
+    pub fn set_children(&mut self, parent: usize, children: &[usize]) {
+        if self.nodes.get(parent).is_none_or(|n| n.container.is_none()) {
+            return;
+        }
+        let mut list: Vec<usize> = Vec::new();
+        for &child in children {
+            if child < self.nodes.len() && !list.contains(&child) && !self.within(parent, child) {
+                list.push(child);
+            }
+        }
+        let start = self
+            .own_start(parent)
+            .min(self.nodes[parent].children().len());
+        let old: Vec<usize> = self.nodes[parent].children()[start..].to_vec();
+        for child in old {
+            self.nodes[child].parent = None;
+        }
+        for &child in &list {
+            if let Some(from) = self.nodes[child].parent.replace(parent)
+                && let Some(c) = &mut self.nodes[from].container
+            {
+                c.children.retain(|&x| x != child);
+            }
+            if self.root == Some(child) {
+                self.root = None;
+            }
+        }
+        if let Some(c) = &mut self.nodes[parent].container {
+            c.children.truncate(start);
+            c.children.extend(list);
+        }
+    }
+
+    /// Whether a widget is `ancestor`, or is in it.
+    pub fn within(&self, mut index: usize, ancestor: usize) -> bool {
+        loop {
+            if index == ancestor {
+                return true;
+            }
+            match self.nodes[index].parent {
+                Some(parent) => index = parent,
+                None => return false,
+            }
+        }
+    }
+
     fn add_side_head(&mut self, title: String) -> usize {
         let toggle = self.add(Node::leaf(Content::SideToggle));
         let title = self.add(Node::leaf(Content::Text {
@@ -1069,6 +1127,37 @@ mod tests {
         t.layout(200.0, 200.0, &Fixed);
         assert_eq!(t.card_text(c), Some(("Plan B".into(), String::new())));
         assert_eq!(t.nodes[extra].rect.y, 24.0);
+    }
+
+    #[test]
+    fn new_children_replace_the_old_ones() {
+        let mut t = Tree::default();
+        let [a, b, c] = ["A", "B", "C"].map(|label| t.add(button(label)));
+        let column = |children: &[usize]| {
+            with(
+                Node::container(Content::Blank, Axis::Column, Align::Stretch),
+                children,
+            )
+        };
+        let first = t.add(column(&[a, b]));
+        let second = t.add(column(&[c]));
+        let row = t.add(with(
+            Node::container(Content::Blank, Axis::Row, Align::Stretch),
+            &[first, second],
+        ));
+        t.root = Some(row);
+        t.set_children(second, &[a, c, a, second, row]);
+        assert_eq!(t.nodes[first].children(), [b]);
+        assert_eq!(t.nodes[second].children(), [a, c]);
+        t.set_children(second, &[]);
+        assert_eq!(t.nodes[c].parent, None);
+        assert!(!t.shown(c));
+
+        // The texts of a card stay when its children change.
+        let texted = t.add(card("Plan", "Write it"));
+        t.set_children(texted, &[c]);
+        assert_eq!(t.nodes[texted].children().len(), 3);
+        assert_eq!(t.nodes[texted].children()[2], c);
     }
 
     #[test]

@@ -384,6 +384,25 @@ impl Window {
         self.state().invalidate(self.hwnd());
     }
 
+    /// Give a container these children, in this order, in place of the ones that it has. A
+    /// widget that was in another container moves out of it. A widget that is in no
+    /// container does not show, and the app can put it in a container again later.
+    ///
+    /// The texts of a card with a title, and the button and the title of a side bar, stay.
+    pub fn set_children<I, A>(&mut self, id: impl Into<AnyId>, children: I)
+    where
+        I: IntoIterator<Item = A>,
+        A: Into<AnyId>,
+    {
+        let children: Vec<usize> = children.into_iter().map(|c| c.into().0).collect();
+        self.state()
+            .tree
+            .borrow_mut()
+            .set_children(id.into().0, &children);
+        self.state().forget_hidden();
+        self.state().invalidate(self.hwnd());
+    }
+
     /// The title and the body of a card. They are empty for a card without a text.
     pub fn card_text(&self, id: Id<kind::Card>) -> (String, String) {
         let text = self.state().tree.borrow().card_text(id.index);
