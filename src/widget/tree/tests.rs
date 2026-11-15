@@ -338,6 +338,29 @@ fn a_drag_starts_on_a_card_and_drops_between_cards() {
 }
 
 #[test]
+fn a_dragged_widget_drops_only_on_a_target_of_its_group() {
+    let (mut t, lanes, cards) = lanes();
+    let row = t.root.unwrap();
+    t.nodes[row].drop_target = true;
+    t.nodes[row].drag_group = 1;
+    for lane in lanes {
+        t.nodes[lane].draggable = true;
+        t.nodes[lane].drag_group = 1;
+        t.nodes[lane].drop_target = false;
+    }
+    // Below the cards, a press is on the lane. The first lane goes after the second one,
+    // also when the pointer is on a card of that lane.
+    assert_eq!(t.drag_source_at(50.0, 100.0), Some(lanes[0]));
+    let place = t.drop_at(180.0, 5.0, lanes[0]).unwrap();
+    assert_eq!((place.target, place.index, place.changes), (row, 1, true));
+    assert_eq!(place.line, Some(Rect::new(199.0, 0.0, 2.0, 300.0)));
+    let place = t.drop_at(20.0, 5.0, lanes[0]).unwrap();
+    assert_eq!((place.index, place.changes), (0, false));
+    // A card is in group 0, and the row does not take it.
+    assert_eq!(t.drop_at(150.0, 5.0, cards[0]), None);
+}
+
+#[test]
 fn new_children_replace_the_old_ones() {
     let (mut t, lanes, cards) = lanes();
     t.set_children(lanes[1], &[cards[0], cards[2], cards[0], lanes[1]]);

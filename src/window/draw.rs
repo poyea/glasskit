@@ -145,18 +145,7 @@ pub(super) fn paint(
         if now.drag.is_some_and(|d| tree.within(index, d.item)) {
             continue;
         }
-        let clip = tree.clip(index);
-        if clip.is_some_and(|c| c.intersect(tree.nodes[index].rect).is_empty()) {
-            continue;
-        }
-        if let Some(c) = clip {
-            unsafe { dc.PushAxisAlignedClip(&d2d(c), D2D1_ANTIALIAS_MODE_ALIASED) };
-        }
-        let drawn = widget(dc, tree, index, theme, formats, now);
-        if clip.is_some() {
-            unsafe { dc.PopAxisAlignedClip() };
-        }
-        drawn?;
+        clipped(dc, tree, index, theme, formats, now)?;
     }
     for index in tree.draw_order() {
         if let Content::Scroll { offset, extent } = tree.nodes[index].content {
@@ -210,8 +199,32 @@ fn dragged(
         .draw_order()
         .into_iter()
         .filter(|&index| tree.within(index, drag.item))
-        .try_for_each(|index| widget(dc, tree, index, theme, formats, now));
+        .try_for_each(|index| clipped(dc, tree, index, theme, formats, now));
     unsafe { dc.SetTransform(&base) };
+    drawn
+}
+
+/// Draw a widget, cut to the scroll that it is in. A widget that is all outside its scroll
+/// is not drawn.
+fn clipped(
+    dc: &ID2D1DeviceContext,
+    tree: &Tree,
+    index: usize,
+    theme: &Theme,
+    formats: &Formats,
+    now: Interaction,
+) -> windows::core::Result<()> {
+    let clip = tree.clip(index);
+    if clip.is_some_and(|c| c.intersect(tree.nodes[index].rect).is_empty()) {
+        return Ok(());
+    }
+    if let Some(c) = clip {
+        unsafe { dc.PushAxisAlignedClip(&d2d(c), D2D1_ANTIALIAS_MODE_ALIASED) };
+    }
+    let drawn = widget(dc, tree, index, theme, formats, now);
+    if clip.is_some() {
+        unsafe { dc.PopAxisAlignedClip() };
+    }
     drawn
 }
 

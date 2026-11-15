@@ -40,8 +40,13 @@ impl Tree {
 
     /// Where the dragged widget `item` goes, if the user drops it at this point.
     pub fn drop_at(&self, x: f32, y: f32, item: usize) -> Option<DropPlace> {
+        let group = self.nodes[item].drag_group;
         let target = self.draw_order().into_iter().rev().find(|&i| {
-            self.nodes[i].drop_target && self.shows_at(i, x, y) && !self.within(i, item)
+            let n = &self.nodes[i];
+            n.drop_target
+                && n.drag_group == group
+                && self.shows_at(i, x, y)
+                && !self.within(i, item)
         })?;
         let node = &self.nodes[target];
         let c = node.container.as_ref()?;

@@ -349,6 +349,15 @@ macro_rules! container {
             self
         }
 
+        /// Put the widget in a group for drag and drop. A dragged [`Card`] drops only on
+        /// a drop target of its group, so a window can have two kinds of cards, each with
+        /// its own places. The default group is 0.
+        #[must_use]
+        pub fn drag_group(mut self, group: u32) -> Self {
+            self.node.drag_group = group;
+            self
+        }
+
         fn container_mut(&mut self) -> &mut Container {
             self.node
                 .container

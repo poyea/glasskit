@@ -189,6 +189,8 @@ pub(crate) struct Node {
     pub clickable: bool,
     pub draggable: bool,
     pub drop_target: bool,
+    /// A dragged widget drops only on a drop target of its group.
+    pub drag_group: u32,
 }
 
 /// Where a dragged widget goes if the user drops it now.
@@ -217,6 +219,7 @@ impl Node {
             clickable: false,
             draggable: false,
             drop_target: false,
+            drag_group: 0,
         }
     }
 
