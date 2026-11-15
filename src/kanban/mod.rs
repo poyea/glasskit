@@ -11,6 +11,8 @@
 //!
 //! - A card and a lane can have a color. The window of a card sets the color of the card,
 //!   and the window of a lane sets the color of the lane.
+//! - The user drags a lane, by its head or its empty part, to another place in the row of
+//!   lanes. Its cards go with it.
 //! - The board can have any number of lanes. The window of a lane, from the button with
 //!   three dots, changes its name and deletes the lane. [`Board::add_lane_by_user`] asks
 //!   the user for a new lane. The user cannot delete a [fixed](Board::set_lane_fixed) lane.
@@ -77,6 +79,8 @@ use editor::{Action, Edit, LaneEdit, LaneNow, editor, lane_editor};
 use model::Model;
 
 /// Characters of the icon font.
+/// The group of the lanes for drag and drop. The cards are in group 0.
+const LANE_GROUP: u32 = 1;
 const ADD_ICON: &str = "\u{E710}";
 const MORE_ICON: &str = "\u{E712}";
 
@@ -147,6 +151,14 @@ pub enum BoardEvent {
     Archived(CardKey),
     /// The user added a lane, at the end.
     LaneAdded(usize),
+    /// The user dragged a lane to another place. Its cards went with it, and the lanes
+    /// between the two places moved by one.
+    LaneMoved {
+        /// The index that the lane had.
+        from: usize,
+        /// The index that the lane has now.
+        to: usize,
+    },
     /// The user changed the name or the color of a lane. [`Board::lane_name`] and
     /// [`Board::lane_tint`] give them.
     LaneChanged(usize),
@@ -215,6 +227,8 @@ impl Lane {
             Card::new()
                 .width(Length::Fill(1.0))
                 .padding(Insets::all(12.0))
+                .draggable()
+                .drag_group(LANE_GROUP)
                 .child(parts),
         );
         Self {
@@ -260,6 +274,8 @@ impl Board {
                 .gap(12.0)
                 .align(Align::Stretch)
                 .height(Length::Fill(1.0))
+                .drop_target()
+                .drag_group(LANE_GROUP)
                 .children(lanes.iter().map(|lane| lane.panel)),
         );
         Self {
@@ -311,6 +327,18 @@ impl Board {
         self.show_lanes(window);
         self.sync(window);
         Some(cards)
+    }
+
+    /// Move a lane, with its cards, to the place `to` among the other lanes: 0 is the
+    /// first place, and a large number is the last. It gives the index that the lane has
+    /// then.
+    pub fn move_lane(&mut self, window: &mut Window, from: usize, to: usize) -> Option<usize> {
+        let to = self.model.move_lane(from, to)?;
+        let lane = self.lanes.remove(from);
+        self.lanes.insert(to, lane);
+        self.show_lanes(window);
+        self.sync(window);
+        Some(to)
     }
 
     /// Whether the user cannot delete a lane.
@@ -459,6 +487,14 @@ impl Board {
                 target,
                 index,
             } => {
+                if *target == self.row {
+                    let from = self.lanes.iter().position(|lane| *item == lane.panel);
+                    let moved = from.and_then(|from| {
+                        let to = self.move_lane(window, from, *index)?;
+                        (to != from).then_some(BoardEvent::LaneMoved { from, to })
+                    });
+                    return Ok(moved);
+                }
                 let key = self.key_of(|widget| *item == widget);
                 let lane = self.lanes.iter().position(|lane| *target == lane.list);
                 let (Some(key), Some(lane)) = (key, lane) else {

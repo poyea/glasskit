@@ -124,6 +124,18 @@ impl Model {
         self.lanes.len() - 1
     }
 
+    /// Move a lane, with its cards, to the place `to` among the other lanes. It gives the
+    /// index that the lane has then.
+    pub(super) fn move_lane(&mut self, from: usize, to: usize) -> Option<usize> {
+        if from >= self.lanes.len() {
+            return None;
+        }
+        let lane = self.lanes.remove(from);
+        let to = to.min(self.lanes.len());
+        self.lanes.insert(to, lane);
+        Some(to)
+    }
+
     /// Remove a lane, and give what its cards held.
     pub(super) fn remove_lane(&mut self, lane: usize) -> Option<Vec<CardData>> {
         if lane >= self.lanes.len() {
@@ -218,6 +230,18 @@ mod tests {
         assert_eq!(model.remove(b), None);
         assert_eq!(titles(&model, 0, false), ["A", "A", "C"]);
         assert_eq!(model.clone_card(b), None);
+    }
+
+    #[test]
+    fn a_lane_moves_with_its_cards() {
+        let (mut model, [a, _, _, d]) = model();
+        assert_eq!(model.move_lane(0, 9), Some(1));
+        assert_eq!(titles(&model, 0, false), ["D"]);
+        assert_eq!(titles(&model, 1, false), ["A", "B", "C"]);
+        assert_eq!(model.find(a), Some((1, 0)));
+        assert_eq!(model.move_lane(1, 0), Some(0));
+        assert_eq!(model.find(d), Some((1, 0)));
+        assert_eq!(model.move_lane(2, 0), None);
     }
 
     #[test]

@@ -115,6 +115,10 @@ fn describe(board: &Board, change: &BoardEvent) -> String {
         BoardEvent::LaneAdded(lane) => {
             format!("added the lane {}", board.lane_name(*lane).unwrap_or(""))
         }
+        BoardEvent::LaneMoved { to, .. } => {
+            let name = board.lane_name(*to).unwrap_or("");
+            format!("moved the lane {name} to {to}")
+        }
         BoardEvent::LaneChanged(lane) => {
             format!("changed the lane {}", board.lane_name(*lane).unwrap_or(""))
         }
